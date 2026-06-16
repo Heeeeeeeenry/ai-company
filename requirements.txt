@@ -1,0 +1,16 @@
+# Core (DeepSeek uses OpenAI-compatible API)
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-openai>=0.2.0
+pydantic>=2.0
+
+# Telegram
+python-telegram-bot>=21.0
+
+# Utils
+python-dotenv>=1.0
+rich>=13.0
+structlog>=24.0
+tenacity>=8.0
+jieba>=0.42
+gnureadline>=8.0  # CJK multi-byte backspace fix on macOS

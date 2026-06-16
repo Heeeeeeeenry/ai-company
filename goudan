@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# ─── 狗蛋儿 · AI Company Launcher ───
+# Cross-platform: macOS, Linux, WSL
+#
+# Usage:  goudan              # Interactive CLI
+#         goudan "write fib"  # One-shot query
+#         goudan --telegram   # Start Telegram bot
+#
+# Install: chmod +x goudan && cp goudan /usr/local/bin/
+
+set -e
+
+# Find ai-company root (resolve symlinks to find real script location)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+AI_COMPANY_DIR="$SCRIPT_DIR"
+
+# If installed as symlink in PATH, find the actual project
+if [ ! -f "$AI_COMPANY_DIR/src/main.py" ]; then
+    # Try common locations
+    for candidate in \
+        "$HOME/.openclaw/workspace/ai-company" \
+        "$HOME/ai-company" \
+        "$HOME/openclaw/workspace/ai-company" \
+        "$(dirname "$SCRIPT_DIR")/ai-company" \
+    ; do
+        if [ -f "$candidate/src/main.py" ]; then
+            AI_COMPANY_DIR="$candidate"
+            break
+        fi
+    done
+fi
+
+if [ ! -f "$AI_COMPANY_DIR/src/main.py" ]; then
+    echo "❌ Cannot find ai-company project."
+    echo "   Expected: $AI_COMPANY_DIR/src/main.py"
+    echo "   Set AI_COMPANY_HOME env var, or install near ~/.openclaw/workspace/"
+    exit 1
+fi
+
+export AI_COMPANY_HOME="$AI_COMPANY_DIR"
+
+# Find Python (prefer python3, fallback to python)
+PYTHON=""
+for cmd in python3 python; do
+    if command -v "$cmd" &>/dev/null; then
+        PYTHON="$cmd"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    echo "❌ Python not found. Install Python 3.10+"
+    exit 1
+fi
+
+# Run
+cd "$AI_COMPANY_DIR"
+
+if [ $# -gt 0 ]; then
+    # With arguments: pass through to main.py
+    exec "$PYTHON" -m src.main "$@"
+else
+    # No arguments: start interactive CLI
+    exec "$PYTHON" -m src.main --mode cli
+fi
