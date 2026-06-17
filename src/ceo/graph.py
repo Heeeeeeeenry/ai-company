@@ -422,7 +422,24 @@ async def triage_node(state: CEOState) -> dict:
             from src.wechat.conversation import ConversationManager
             mgr = ConversationManager(contact)
             replies = mgr.run(turns=max_turns, poll_interval=3.0)
-            reply_summary = f"与{contact}对话完成，共回复{len(replies)}条消息"
+            
+            # Build detailed summary
+            sent = [r for r in replies if r["sent"]]
+            failed = [r for r in replies if not r["sent"]]
+            
+            parts = [f"与{contact}对话完成"]
+            if sent:
+                parts.append(f"已发送{len(sent)}条")
+                for r in sent:
+                    parts.append(f"  ✓ {r['text'][:40]}")
+            if failed:
+                parts.append(f"生成但发送失败{len(failed)}条")
+                for r in failed:
+                    parts.append(f"  ✗ {r['text'][:40]} ({r.get('error','?')})")
+            if not replies:
+                parts.append("无新消息需要回复")
+            
+            reply_summary = "\n".join(parts)
             return {
                 "phase": "deliver",
                 "department": "devops",
@@ -430,7 +447,7 @@ async def triage_node(state: CEOState) -> dict:
                 "final_output": reply_summary,
                 "score_card": {"score": 95, "decision": "APPROVE", "final_score": 95,
                               "next_action": "deliver"},
-                "execution_log": [f"[TRIAGE] Conversation fast-path: {contact}, {len(replies)} replies"],
+                "execution_log": [f"[TRIAGE] Conversation fast-path: {contact}, {len(sent)} sent, {len(failed)} failed"],
             }
         except Exception as e:
             import logging

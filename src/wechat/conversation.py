@@ -316,24 +316,54 @@ class ConversationManager:
             turns: Max number of reply turns
             poll_interval: Seconds between checks
         
-        Returns list of sent replies.
+        Returns list of reply dicts: {"text": str, "sent": bool, "error": str|None}
         """
         replies = []
         
         for turn in range(turns):
             logger.info("=== Turn %d/%d ===", turn + 1, turns)
             
-            reply = self.step()
-            if reply:
-                replies.append(reply)
+            # Read + generate
+            self.read_recent(count=8)
+            
+            if not self.history:
+                logger.info("No messages found in chat")
+                continue
+            
+            last_msg = self.history[-1]
+            if last_msg["sender"] == "me":
+                logger.info("Last message is mine, skipping")
+                time.sleep(poll_interval)
+                continue
+            
+            reply = self.generate_reply()
+            if not reply:
+                continue
+            
+            # Send
+            result = self.send(reply)
+            sent = result.get("success", False)
+            error = result.get("error") if not sent else None
+            
+            replies.append({
+                "text": reply,
+                "sent": sent,
+                "error": error,
+            })
+            
+            if sent:
+                logger.info("✓ Turn %d sent: %s", turn + 1, reply[:50])
+            else:
+                logger.error("✗ Turn %d failed (%s): %s", turn + 1, error, reply[:50])
             
             if turn < turns - 1:
                 logger.info("Waiting %.1fs for next turn...", poll_interval)
                 time.sleep(poll_interval)
         
-        if replies:
-            logger.info("Completed: %d replies sent", len(replies))
+        sent_count = sum(1 for r in replies if r["sent"])
+        if sent_count > 0:
+            logger.info("Completed: %d/%d replies sent", sent_count, len(replies))
         else:
-            logger.info("Completed: no replies needed")
+            logger.info("Completed: no replies sent")
         
         return replies
