@@ -163,27 +163,22 @@ class WechatCoordinator:
         cy = wy + int(wh * 0.5)
         # Then click input field
         ix = wx + ww // 2
-        iy = wy + int(wh * 0.88)
+        iy = wy + wh - 25
         
         for attempt in range(self.MAX_RETRIES_PER_STATE):
-            # ESC 3x to aggressively dismiss search panel
+            # ESC to dismiss search
             self.action.press_esc()
-            time.sleep(0.3)
-            self.action.press_esc()
-            time.sleep(0.3)
-            self.action.press_esc()
-            time.sleep(0.5)
-            # Click chat area center to ensure focus
-            self.action.click(cx, cy)
-            time.sleep(0.5)
-            # Click input field with extra delay
+            time.sleep(0.8)
+            # Triple click input field at exact bottom position
             self.action.click(ix, iy)
-            time.sleep(0.5)
+            time.sleep(0.3)
             self.action.click(ix, iy)
-            time.sleep(0.5)
+            time.sleep(0.3)
+            self.action.click(ix, iy)
+            time.sleep(0.8)
             self.action.type_text(message)
             time.sleep(0.5)
-            return True, f"dismiss+click input({ix},{iy})"
+            return True, f"3xclick input({ix},{iy})"
         return False, "Message not typed"
     
     def _send_and_verify(self, message: str) -> tuple:
