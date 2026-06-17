@@ -91,6 +91,17 @@ class WechatCoordinator:
         # STATE 6: Send and verify
         ok, detail = self._send_and_verify(message)
         if not ok:
+            # FINAL SAFETY CHECK: message might have been sent but vision missed it.
+            # If the message is already in the chat, declare success to prevent
+            # caller retries that would send duplicates.
+            logger.warning("Send+verify failed, checking if message was already sent...")
+            time.sleep(2)
+            sent_result = self.vision.check_message_sent(message)
+            if sent_result and sent_result.get("sent") and sent_result.get("is_expected_message"):
+                logger.info("VISION: message was already sent (belated verification)")
+                ok, detail = True, "verified (delayed)"
+        
+        if not ok:
             return {"success": False, "state": "VERIFY_SENT", "error": detail}
         
         elapsed = time.time() - start
@@ -233,14 +244,23 @@ class WechatCoordinator:
         return False, "Message not confirmed in input box"
     
     def _send_and_verify(self, message: str) -> tuple:
-        """STATE 6: Press Enter and verify message in chat."""
+        """STATE 6: Press Enter ONCE, then retry vision verification only.
+
+        CRITICAL: Never press Enter on retry — if the first Enter worked
+        but vision didn't catch it, retrying Enter would send the message
+        again (or worse: the caller retries the whole flow, sending duplicates).
+        """
+        self.action.press_enter()
+        time.sleep(1.5)
+        
         for attempt in range(self.MAX_RETRIES_PER_STATE):
-            self.action.press_enter()
-            time.sleep(1.5)
-            
             result = self.vision.check_message_sent(message)
             if result and result.get("sent") and result.get("is_expected_message"):
                 return True, "verified"
+            logger.warning("Vision: message not verified in chat (attempt %d)", attempt+1)
+            if attempt < self.MAX_RETRIES_PER_STATE - 1:
+                time.sleep(2)  # wait longer for chat to update before re-check
+        
         return False, "Message not verified as sent"
 
     # ─── 文件传输助手 special handler ───
