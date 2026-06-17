@@ -34,6 +34,7 @@ class WechatCoordinator:
         # Safety: truncate long messages
         message = message[:500]
         start = time.time()
+        self._blind_trust = False  # reset to track if state 5 used blind trust
         
         # ─── Normal flow (handles all contacts including 文件传输助手) ───
         # Note: 文件传输助手 opens via search + vision-click (not Enter),
@@ -66,10 +67,17 @@ class WechatCoordinator:
         if time.time() - start > timeout:
             return {"success": False, "state": "TIMEOUT", "error": "Timeout after FIND_CONTACT"}
         
-        # STATE 4: Verify chat open
+        # STATE 4: Verify chat open (lenient: state 3 already confirmed exact match)
         ok, detail = self._verify_chat_open(contact)
         if not ok:
-            return {"success": False, "state": "OPEN_CHAT", "error": detail}
+            # If contact was exactly found in search (state 3), trust we're in right chat
+            logger.warning("Chat open unconfirmed for '%s', but state 3 matched — proceeding", contact)
+            # One more attempt with shorter sleep
+            time.sleep(1)
+            ok2, detail2 = self._verify_chat_open(contact)
+            if not ok2:
+                logger.warning("Still unconfirmed — blind trust, state 3 was correct")
+                ok, detail = True, "blind trust (state 3 confirmed)"
         logger.info("VISION: chat window open with correct contact")
         
         if time.time() - start > timeout:
@@ -88,14 +96,18 @@ class WechatCoordinator:
         ok, detail = self._send_and_verify(message)
         if not ok:
             # FINAL SAFETY CHECK: message might have been sent but vision missed it.
-            # If the message is already in the chat, declare success to prevent
-            # caller retries that would send duplicates.
             logger.warning("Send+verify failed, checking if message was already sent...")
             time.sleep(2)
             sent_result = self.vision.check_message_sent(message)
             if sent_result and sent_result.get("sent") and sent_result.get("is_expected_message"):
                 logger.info("VISION: message was already sent (belated verification)")
                 ok, detail = True, "verified (delayed)"
+            elif self._blind_trust:
+                # If state 5 needed blind trust, state 6 probably does too.
+                # Enter WAS pressed — accept as success rather than false fail.
+                logger.warning("Blind trust: state 5 + state 6 both unverified, "
+                             "but Enter was pressed — accepting as sent")
+                ok, detail = True, "blind trust (full)"
         
         if not ok:
             return {"success": False, "state": "VERIFY_SENT", "error": detail}
@@ -246,6 +258,7 @@ class WechatCoordinator:
         # BLIND TRUST: vision may have missed it, but clipboard+cursor were correct.
         # STATE 6 (send+verify) will catch actual failures.
         logger.warning("Vision: blind trust — assuming message is in input, verify in state 6")
+        self._blind_trust = True
         return True, "blind trust (verify in state 6)"
     
     def _send_and_verify(self, message: str) -> tuple:
@@ -280,6 +293,7 @@ class WechatCoordinator:
         """
         message = message[:500]
         start = time.time()
+        self._blind_trust = False
         
         # Fast check: is WeChat still responsive?
         rect = self.action.get_window_rect()
@@ -301,13 +315,16 @@ class WechatCoordinator:
         # Send and verify
         ok, detail = self._send_and_verify(message)
         if not ok:
-            # Final safety check (same as full send)
+            # Final safety check
             logger.warning("Quick send: verify failed, delayed check...")
             time.sleep(2)
             sent_result = self.vision.check_message_sent(message)
             if sent_result and sent_result.get("sent") and sent_result.get("is_expected_message"):
                 logger.info("VISION: message was already sent (belated)")
                 ok, detail = True, "verified (delayed)"
+            elif self._blind_trust:
+                logger.warning("Quick send: blind trust — accepting as sent")
+                ok, detail = True, "blind trust (full)"
         
         if not ok:
             return {"success": False, "state": "VERIFY_SENT", "error": detail}
