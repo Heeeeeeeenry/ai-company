@@ -1,27 +1,34 @@
-"""AI Conversation Engine — read WeChat messages, generate replies, send back.
+"""Conversation Manager — orchestrates the AI chat pipeline.
 
-Pattern:
-  1. Screenshot chat window → Qwen-VL reads last N messages
-  2. DeepSeek generates contextual reply based on conversation history
-  3. quick_send() dispatches reply (skip contact search, already in chat)
+Architecture:
+    MessageParser  →  MemoryAgent  →  RelationshipAgent  →  PersonaAgent
+         ↓                                                     ↓
+    RhythmController  ←──────────────────────────────────  ConversationManager
+         ↓                                                     ↓
+    ReplyGenerator  →  [Approval?]  →  WechatAgent
 
-Memory: in-session conversation log, survives within goudan session lifetime.
+Priorities (by the user's design):
+    P0: Contact profile + Long-term memory
+    P1: Persona system + Reply rhythm
+    P2: Mood state machine
+    P3: Knowledge graph
+    P4: Full auto-send (what most people start with, and fail)
 """
 
-import logging
+import os
 import time
-import json
+import random
+import logging
 from typing import Optional
+from datetime import datetime
 
 logger = logging.getLogger("ai_company.wechat.conversation")
 
 
-# ─── Qwen-VL prompt: read recent messages from chat screenshot ───
-
 PROMPT_READ_MESSAGES = """Analyze this WeChat screenshot of a chat conversation.
 Extract the last __MAX__ messages visible in the chat window.
 For each message, identify:
-  - sender: "me" if it's the current user's message (right-aligned, green/white bubble), 
+  - sender: "me" if it's the current user's message (right-aligned, green/white bubble),
             or the contact's name if from the other person
   - content: the exact text of the message
 
@@ -32,37 +39,53 @@ Return ONLY JSON array (oldest first):
 ]"""
 
 
-class Conversation:
-    """AI-powered WeChat conversation handler.
-    
-    Tracks context in-session. Each Conversation instance remembers:
-      - contact name
-      - message history (sender/content pairs)
-      - whether we're currently in the chat window
+REPLY_PROMPT = """__PERSONA__
+
+__RELATIONSHIP__
+__MEMORY__
+
+下面是最近的微信对话：
+__CONVERSATION__
+
+__STRATEGY__
+
+请以我的身份回复对方。只输出回复内容，不要加引号或任何解释。"""
+
+
+class ConversationManager:
+    """Full pipeline: read → think → decide → reply → send.
     
     Usage:
-      conv = Conversation("小号")
-      conv.reply()  # reads, generates, sends one reply
-      conv.listen_and_reply_loop(max_turns=5)  # continuous loop
+        mgr = ConversationManager("小号")
+        mgr.step()  # one turn: read, decide, maybe reply
+        mgr.run(turns=5)  # continuous loop
     """
     
-    def __init__(self, contact: str, max_history: int = 20):
+    def __init__(self, contact: str, max_history: int = 30):
         self.contact = contact
         self.max_history = max_history
-        self.history: list = []  # [{"sender": "...", "content": "..."}, ...]
-        self.in_chat = False  # set to True after first send()
+        self.history: list = []  # [{"sender": str, "content": str, "time": str}]
+        self.in_chat = False
         
+        # Lazy imports
         from src.wechat.coordinator import WechatCoordinator
         from src.wechat.vision import WechatVision
+        from src.wechat.persona import get_persona
+        from src.wechat.relationship import get_relationship
+        from src.wechat.memory import MemoryAgent
+        from src.wechat.rhythm import RhythmController
+        
         self.coordinator = WechatCoordinator()
         self.vision = WechatVision()
+        self.persona = get_persona()
+        self.relationship = get_relationship(contact)
+        self.memory = MemoryAgent()
+        self.rhythm = RhythmController(persona=self.persona)
         
-        # DeepSeek client for reply generation
         self._llm = None
     
     def _get_llm(self):
         if self._llm is None:
-            import os
             from openai import OpenAI
             self._llm = OpenAI(
                 api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
@@ -70,109 +93,152 @@ class Conversation:
             )
         return self._llm
     
-    # ─── Message reading (vision) ───
+    # ═══════════════════════════════════════════
+    # Step 1: Read messages (Qwen-VL)
+    # ═══════════════════════════════════════════
     
-    def read_recent(self, count: int = 5) -> list:
-        """Read the last `count` messages from the WeChat chat window via Qwen-VL.
-        
-        Returns list of {"sender": str, "content": str}, newest last.
-        """
+    def read_recent(self, count: int = 8) -> list:
+        """Read last N messages from chat window via Qwen-VL."""
         prompt = PROMPT_READ_MESSAGES.replace("__MAX__", str(count))
         img = self.vision._capture()
         if not img:
-            logger.warning("Failed to capture screenshot for message reading")
             return []
         
         result = self.vision._ask(img, prompt, max_tokens=500)
         if not result:
-            logger.warning("Qwen-VL returned None for message reading")
             return []
         
-        # result should be a JSON array
-        if isinstance(result, list):
-            messages = result
-        elif isinstance(result, dict) and "messages" in result:
-            messages = result["messages"]
-        else:
-            logger.warning("Unexpected Qwen-VL response format: %s", str(result)[:200])
-            return []
+        messages = result if isinstance(result, list) else result.get("messages", [])
         
-        # Update local history (deduplicate by checking last N)
+        # Deduplicate and add to history
         for msg in messages:
             if isinstance(msg, dict) and msg.get("content"):
-                self._add_to_history(msg["sender"], msg["content"])
+                sender = msg["sender"]
+                content = msg["content"]
+                # Skip duplicates
+                if self.history and self.history[-1]["content"] == content:
+                    continue
+                self.history.append({
+                    "sender": sender,
+                    "content": content,
+                    "time": datetime.now().isoformat(),
+                })
+        
+        # Trim history
+        if len(self.history) > self.max_history:
+            self.history = self.history[-self.max_history:]
         
         return messages
     
-    def _add_to_history(self, sender: str, content: str):
-        """Add message to local history, avoiding exact duplicates."""
-        if self.history and self.history[-1]["content"] == content:
-            return  # skip exact duplicate
-        self.history.append({"sender": sender, "content": content})
-        if len(self.history) > self.max_history:
-            self.history = self.history[-self.max_history:]
+    # ═══════════════════════════════════════════
+    # Step 2: Extract memories from conversation
+    # ═══════════════════════════════════════════
     
-    # ─── AI reply generation (DeepSeek) ───
+    def _extract_memories(self):
+        """Extract facts from recent conversation and store."""
+        recent = [m for m in self.history[-10:] if m["sender"] != "me"]
+        if len(recent) >= 3:
+            self.memory.extract_facts(self.contact, self.history[-10:])
     
-    def generate_reply(self, context_window: int = 10) -> Optional[str]:
-        """Generate a contextual reply using DeepSeek based on recent messages.
-        
-        Reads the latest messages, then generates a natural response.
-        """
-        # Read latest messages first
-        self.read_recent(count=8)
-        
+    # ═══════════════════════════════════════════
+    # Step 3: Generate reply (with full context)
+    # ═══════════════════════════════════════════
+    
+    def generate_reply(self) -> Optional[str]:
+        """Generate a reply using the full pipeline context."""
         if not self.history:
-            logger.warning("No message history available for reply generation")
             return None
         
-        # Build conversation context for the LLM
-        recent = self.history[-context_window:]
-        context_lines = []
+        # Check if last message is from me
+        last_msg = self.history[-1]
+        if last_msg["sender"] == "me":
+            return None
+        
+        # ── Rhythm: should we even reply? ──
+        rhythm_decision = self.rhythm.should_reply(
+            self.contact,
+            last_msg["content"],
+            closeness=self.relationship.closeness,
+        )
+        
+        if not rhythm_decision["should_reply"]:
+            logger.info(
+                "Skipping reply (reason: %s, message: %s)",
+                rhythm_decision["reason"],
+                last_msg["content"][:30],
+            )
+            return None
+        
+        # ── Extract memories from recent conversation ──
+        self._extract_memories()
+        
+        # ── Build conversation context ──
+        recent = self.history[-12:]
+        conv_lines = []
         for msg in recent:
             role = "我" if msg["sender"] == "me" else msg["sender"]
-            context_lines.append(f"{role}: {msg['content']}")
+            conv_lines.append(f"{role}: {msg['content']}")
+        conversation_text = "\n".join(conv_lines)
         
-        conversation_text = "\n".join(context_lines)
+        # ── Get reply strategy ──
+        should_end = self.rhythm.should_end_conversation(
+            self.contact, self.history
+        )
+        strategy = self.rhythm.get_reply_strategy(
+            self.contact, self.relationship.closeness, should_end
+        )
         
-        # Check if the last message is from us (don't reply to ourselves)
-        if recent[-1]["sender"] == "me":
-            logger.info("Last message is from me, waiting for other person...")
-            return None
+        # ── Build strategy hints ──
+        strategy_lines = []
+        if strategy["end_hint"]:
+            strategy_lines.append("- 对方看起来不想继续聊了，回复要简短收尾，不要开新话题")
+        if strategy["ask_question"]:
+            strategy_lines.append("- 可以自然地反问对方一个问题，保持对话活跃")
+        strategy_lines.append(f"- 回复控制在{strategy['max_length']}字以内")
+        strategy_text = "\n".join(strategy_lines)
         
-        prompt = f"""你是一个正在帮我和别人微信聊天的助手。以下是最近的对话：
-
-{conversation_text}
-
-请以我的身份，用自然口语化的中文回复对方。要求：
-- 简短自然，像真人聊天，不要长篇大论
-- 可以适当使用语气词（哦、呢、吧、哈等）
-- 保持轻松友好的语气
-- 不要用"你好""请问"等客套开头
-- 只输出回复内容，不要加任何解释或前缀
-
-我的回复："""
-
+        # ── Build full prompt ──
+        memory_text = self.memory.retrieve(
+            self.contact, last_msg["content"]
+        )
+        
+        prompt = (
+            REPLY_PROMPT
+            .replace("__PERSONA__", self.persona.build_system_prompt())
+            .replace("__RELATIONSHIP__", self.relationship.build_prompt_fragment())
+            .replace("__MEMORY__", memory_text if memory_text else "")
+            .replace("__CONVERSATION__", conversation_text)
+            .replace("__STRATEGY__", strategy_text)
+        )
+        
+        logger.debug("Reply prompt length: %d chars", len(prompt))
+        
         try:
             client = self._get_llm()
             resp = client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=200,
-                temperature=0.9,
+                max_tokens=250,
+                temperature=0.85,
             )
             reply = resp.choices[0].message.content.strip()
-            # Strip quotes that LLM sometimes wraps around
             reply = reply.strip('"').strip("'").strip("「").strip("」")
-            return reply
+            reply = reply.strip()
+            
+            if reply and len(reply) > 0:
+                return reply
+            return None
+            
         except Exception as e:
-            logger.error("DeepSeek reply generation failed: %s", e)
+            logger.error("Reply generation failed: %s", e)
             return None
     
-    # ─── Send reply ───
+    # ═══════════════════════════════════════════
+    # Step 4: Send reply (with rhythm delay)
+    # ═══════════════════════════════════════════
     
     def send(self, message: str, contact: Optional[str] = None) -> dict:
-        """Send a message. Uses quick_send if we're already in chat."""
+        """Send a message, using quick_send if already in chat."""
         contact = contact or self.contact
         
         if self.in_chat:
@@ -183,67 +249,91 @@ class Conversation:
                 self.in_chat = True
         
         if result.get("success"):
-            self._add_to_history("me", message)
+            self.history.append({
+                "sender": "me",
+                "content": message,
+                "time": datetime.now().isoformat(),
+            })
         
         return result
     
-    # ─── High-level: one-turn reply ───
+    # ═══════════════════════════════════════════
+    # Step 5: One full turn
+    # ═══════════════════════════════════════════
     
-    def reply(self) -> Optional[str]:
-        """Read the latest messages, generate a reply, and send it.
+    def step(self) -> Optional[str]:
+        """One turn: read → extract memories → decide → generate → send.
         
-        Returns the sent reply text, or None if no reply was needed/sent.
+        Returns the sent reply text, or None if no reply was sent.
         """
-        reply_text = self.generate_reply()
-        if not reply_text:
+        # Read latest messages
+        self.read_recent(count=8)
+        
+        if not self.history:
+            logger.info("No messages found")
             return None
         
-        result = self.send(reply_text)
+        last_msg = self.history[-1]
+        logger.info(
+            "Last message: [%s] %s",
+            last_msg["sender"],
+            last_msg["content"][:50],
+        )
+        
+        # Generate reply (includes rhythm check internally)
+        reply = self.generate_reply()
+        if not reply:
+            return None
+        
+        # Apply rhythm delay before sending
+        rhythm_decision = self.rhythm.should_reply(
+            self.contact,
+            last_msg["content"],
+            closeness=self.relationship.closeness,
+        )
+        
+        delay = rhythm_decision.get("delay", random.uniform(30, 120))
+        logger.info("Waiting %.1fs before replying...", delay)
+        time.sleep(delay)
+        
+        # Send
+        result = self.send(reply)
         if result.get("success"):
-            logger.info("Sent reply: %s", reply_text[:50])
-            return reply_text
+            logger.info("✓ Sent: %s", reply[:50])
+            return reply
         else:
-            logger.error("Failed to send reply: %s", result.get("error"))
+            logger.error("✗ Failed to send: %s", result.get("error"))
             return None
     
-    # ─── Continuous loop ───
+    # ═══════════════════════════════════════════
+    # Step 6: Continuous loop
+    # ═══════════════════════════════════════════
     
-    def listen_and_reply(self, max_turns: int = 3, poll_interval: float = 5.0) -> list:
-        """Continuously listen for new messages and reply.
+    def run(self, turns: int = 5, poll_interval: float = 8.0) -> list:
+        """Run N turns of read-and-reply.
         
         Args:
-            max_turns: Maximum number of reply turns
-            poll_interval: Seconds to wait between checks
+            turns: Max number of reply turns
+            poll_interval: Seconds between checks
         
         Returns list of sent replies.
         """
         replies = []
-        last_msg_count = len(self.history)
         
-        for turn in range(max_turns):
-            logger.info("Turn %d/%d: reading messages...", turn + 1, max_turns)
+        for turn in range(turns):
+            logger.info("=== Turn %d/%d ===", turn + 1, turns)
             
-            self.read_recent(count=5)
-            new_count = len(self.history)
-            
-            if new_count == last_msg_count:
-                logger.info("No new messages, waiting %.1fs...", poll_interval)
-                time.sleep(poll_interval)
-                continue
-            
-            # Check if last message is from us
-            if self.history and self.history[-1]["sender"] == "me":
-                last_msg_count = new_count
-                logger.info("Last message is mine, waiting...")
-                time.sleep(poll_interval)
-                continue
-            
-            reply = self.reply()
+            reply = self.step()
             if reply:
                 replies.append(reply)
             
-            last_msg_count = len(self.history)
-            if turn < max_turns - 1:
+            if turn < turns - 1:
+                logger.info("Waiting %.1fs for next turn...", poll_interval)
                 time.sleep(poll_interval)
+        
+        if replies:
+            logger.info("Completed: %d replies sent", len(replies))
+        else:
+            logger.info("Completed: no replies needed")
         
         return replies

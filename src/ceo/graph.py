@@ -419,9 +419,9 @@ async def triage_node(state: CEOState) -> dict:
         contact, max_turns = conv_request
         max_turns = max_turns or 3  # default 3 turns
         try:
-            from src.wechat.conversation import Conversation
-            conv = Conversation(contact)
-            replies = conv.listen_and_reply(max_turns=max_turns, poll_interval=3.0)
+            from src.wechat.conversation import ConversationManager
+            mgr = ConversationManager(contact)
+            replies = mgr.run(turns=max_turns, poll_interval=3.0)
             reply_summary = f"与{contact}对话完成，共回复{len(replies)}条消息"
             return {
                 "phase": "deliver",

@@ -320,6 +320,16 @@ async def run_cli():
         if user_input.lower().startswith("/vision"):
             _cmd_vision(console, user_input, current_session)
             continue
+        # ── Persona & Relationship commands ──
+        if user_input.lower().startswith("/mood"):
+            _cmd_mood(console, user_input)
+            continue
+        if user_input.lower().startswith("/whois"):
+            _cmd_whois(console, user_input)
+            continue
+        if user_input.lower().startswith("/remember "):
+            _cmd_remember(console, user_input)
+            continue
         if user_input.lower() == "/status":
             _show_status(console, plat, roles, store)
             continue
@@ -438,6 +448,9 @@ def _show_help(console):
     table.add_row("/clear, /cls", "Clear screen")
     table.add_row("/vision scan", "Capture + analyze screen")
     table.add_row("/vision status", "Visual context status")
+    table.add_row("/mood [state]", "Set today's mood (normal|busy|tired|happy|lazy)")
+    table.add_row("/whois <contact>", "Show relationship profile")
+    table.add_row("/remember <c> <f>", "Store fact about contact")
     table.add_row("/fix, /heal", "Auto-detect and fix code errors")
     table.add_row("/quit, /q", "Exit")
     console.print(table)
@@ -686,6 +699,72 @@ def _cmd_global(console, user_input):
         return
 
     console.print("[yellow]Usage: /global set|get|list[/yellow]")
+
+
+# ═══════════════════════════════════════════════════════════════
+# Persona & Relationship CLI commands
+# ═══════════════════════════════════════════════════════════════
+
+def _cmd_mood(console, user_input: str):
+    """Handle /mood <state> command."""
+    parts = user_input.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        from src.wechat.persona import get_persona
+        p = get_persona()
+        console.print(f"[cyan]当前状态:[/cyan] {p.today_mood}")
+        console.print("[dim]可选: normal, busy, tired, happy, lazy[/dim]")
+        return
+    
+    mood = parts[1].strip().lower()
+    valid = {"normal", "busy", "tired", "happy", "lazy"}
+    if mood not in valid:
+        console.print(f"[red]无效状态: {mood}[/red]")
+        console.print("[dim]可选: normal, busy, tired, happy, lazy[/dim]")
+        return
+    
+    from src.wechat.persona import get_persona
+    p = get_persona()
+    p.update_mood(mood)
+    mood_emoji = {"normal": "😐", "busy": "🏃", "tired": "😴", "happy": "😊", "lazy": "🦥"}
+    console.print(f"[green]状态已更新:[/green] {mood_emoji.get(mood, '')} {mood}")
+
+
+def _cmd_whois(console, user_input: str):
+    """Handle /whois <contact> command."""
+    parts = user_input.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        console.print("[yellow]Usage: /whois <联系人>[/yellow]")
+        return
+    
+    contact = parts[1].strip()
+    from src.wechat.relationship import get_relationship
+    rel = get_relationship(contact)
+    
+    console.print(f"\n[bold cyan]👤 {contact}[/bold cyan]")
+    console.print(f"  关系: {rel.relation} | 亲密度: {rel.closeness}/100")
+    if rel.notes:
+        console.print(f"  备注: {rel.notes}")
+    if rel.facts:
+        console.print(f"  已知信息 ({len(rel.facts)}条):")
+        for f in rel.facts[-5:]:
+            console.print(f"    · {f['fact']} ({f['when']})")
+    console.print()
+
+
+def _cmd_remember(console, user_input: str):
+    """Handle /remember <contact> <fact> command."""
+    parts = user_input.strip().split(maxsplit=2)
+    if len(parts) < 3:
+        console.print("[yellow]Usage: /remember <联系人> <事实>[/yellow]")
+        console.print("[dim]Example: /remember 张三 7月去日本出差[/dim]")
+        return
+    
+    contact = parts[1].strip()
+    fact = parts[2].strip()
+    
+    from src.wechat.relationship import add_fact
+    add_fact(contact, fact)
+    console.print(f"[green]✓ 已记住关于 {contact} 的事实:[/green] {fact}")
 
 
 def _cmd_vision(console, user_input, current_session):
