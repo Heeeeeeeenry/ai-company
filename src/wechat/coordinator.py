@@ -31,6 +31,8 @@ class WechatCoordinator:
     
     def send(self, contact: str, message: str, timeout: int = 60) -> dict:
         """Send a WeChat message. Returns {success, state, detail}."""
+        # Safety: truncate long messages
+        message = message[:500]
         start = time.time()
         
         # STATE 1: Check WeChat

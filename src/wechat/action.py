@@ -124,7 +124,9 @@ class WechatAction:
         return self._run(OPEN_SEARCH)
     
     def type_text(self, text: str) -> bool:
-        """Type text via clipboard paste."""
+        """Type text via clipboard paste. Truncates long messages."""
+        # Truncate to prevent clipboard overflow / accidental paste of large content
+        text = text[:500]
         escaped = text.replace('"', '\\"')
         return self._run(TYPE_TEXT.format(text=escaped))
     
