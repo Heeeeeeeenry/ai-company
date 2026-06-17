@@ -5,6 +5,8 @@ from datetime import datetime
 import operator
 import json
 import re
+import os
+import urllib.request
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -120,6 +122,98 @@ def _safe_str_list(items: list, key: str = "name") -> list[str]:
         else:
             result.append(str(item))
     return result
+
+
+def _strip_wrapping_quotes(text: str) -> str:
+    """Trim whitespace, surrounding quotes, and trailing punctuation."""
+    if not text:
+        return ""
+    text = text.strip().strip('"\'' "“”‘’「」『』")
+    return text.strip(" ，,。：:；;")
+
+
+def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
+    """Extract (contact, message) from natural-language WeChat send requests."""
+    task = (task or "").strip()
+    if not task or not re.search(r"微信|wechat", task, re.IGNORECASE):
+        return None
+
+    quoted_parts = [
+        _strip_wrapping_quotes(m.group(1))
+        for m in re.finditer(r'["“”「『](.+?)["””」』]', task)
+    ]
+    if len(quoted_parts) >= 2 and all(quoted_parts[:2]):
+        return quoted_parts[0], quoted_parts[1]
+
+    message = ""
+    message_match = None
+    message_patterns = [
+        r"(?:发送消息|发消息|发送信息|发信息)\s*(?:给[^，,：:\n]*)?[：:]\s*(.+)$",
+        r"(?:发送消息|发消息|发送信息|发信息)\s+(.+)$",
+        r"(?:说|内容是|内容为)\s*[：:]\s*(.+)$",
+    ]
+    for pattern in message_patterns:
+        match = re.search(pattern, task, re.IGNORECASE)
+        if match:
+            message_match = match
+            message = _strip_wrapping_quotes(match.group(1))
+            if message:
+                break
+
+    search_text = task[:message_match.start()] if message_match else task
+    contact = ""
+    contact_patterns = [
+        r"(?:给我的微信(?:好友|联系人)?|给微信(?:好友|联系人)?|给(?:好友|联系人)?)\s*[：:，,\s]*([^，。:：\n]+)",
+        r"(?:微信(?:发送消息)?给)\s*([^，。:：\n]+)",
+        r"(?:联系人)\s*[：:，,\s]*([^，。:：\n]+)",
+    ]
+    for pattern in contact_patterns:
+        match = re.search(pattern, search_text, re.IGNORECASE)
+        if match:
+            contact = _strip_wrapping_quotes(match.group(1))
+            if contact:
+                break
+
+    if contact and message:
+        return contact, message
+    return None
+
+
+def _debug_report(hypothesis_id: str, location: str, msg: str, data: Optional[dict] = None) -> None:
+    # #region debug-point A:wechat-triage-report
+    env_path = ".dbg/wechat-send-fail.env"
+    server_url = os.environ.get("DEBUG_SERVER_URL", "")
+    session_id = os.environ.get("DEBUG_SESSION_ID", "")
+    run_id = os.environ.get("DEBUG_RUN_ID", "pre-fix")
+    try:
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("DEBUG_SERVER_URL="):
+                    server_url = line.split("=", 1)[1].strip()
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    session_id = line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    if not server_url or not session_id:
+        return
+    payload = {
+        "sessionId": session_id,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "msg": msg,
+        "data": data or {},
+    }
+    try:
+        request = urllib.request.Request(
+            server_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=2).read()
+    except Exception:
+        pass
+    # #endregion
 
 
 def _parse_tool_failures(logs: list) -> int:
@@ -254,7 +348,6 @@ def _safe_node(name: str):
 async def triage_node(state: CEOState) -> dict:
     """Node function."""
     from src.departments.roles import role_registry
-    import re
 
     llm = _get_llm("ceo")
     agent_state = get_agent_state("ceo")
@@ -262,17 +355,31 @@ async def triage_node(state: CEOState) -> dict:
     
     # ═══ WeChat Send Fast-Path: direct execution, no agent loop ═══
     task = state.get("user_request", "")
-    wechat_match = re.search(
-        r'(?:微信|wechat).*?(?:给|发送|发).*?["“”「」](.+?)["“”「」]'
-        r'.*?(?:发送|发|说).*?["“”「」](.+?)["“”「」]',
-        task
+    wechat_request = _extract_wechat_send_request(task)
+    _debug_report(
+        "A",
+        "src/ceo/graph.py:triage_node",
+        "[DEBUG] Parsed WeChat fast-path request",
+        {
+            "task": task[:200],
+            "wechat_request": list(wechat_request) if wechat_request else None,
+        },
     )
-    if wechat_match:
-        contact = wechat_match.group(1).strip()
-        message = wechat_match.group(2).strip()
+    if wechat_request:
+        contact, message = wechat_request
         try:
             from src.execution._wechat_tool import send_wechat_message
             result = send_wechat_message(contact, message)
+            _debug_report(
+                "A",
+                "src/ceo/graph.py:triage_node",
+                "[DEBUG] WeChat fast-path tool returned",
+                {
+                    "contact": contact,
+                    "message": message[:100],
+                    "result": result,
+                },
+            )
             if result["success"]:
                 return {
                     "phase": "deliver",
@@ -293,8 +400,18 @@ async def triage_node(state: CEOState) -> dict:
                                   "next_action": "deliver"},
                     "execution_log": [f"[TRIAGE] WeChat fast-path -> FAILED: {result.get('error')}"],
                 }
-        except Exception:
-            pass  # Fall through to normal routing
+        except Exception as e:
+            import logging
+            logging.getLogger("ai_company").warning(
+                "WeChat fast-path failed, falling back to normal routing: %s",
+                e,
+            )
+            _debug_report(
+                "A",
+                "src/ceo/graph.py:triage_node",
+                "[DEBUG] WeChat fast-path raised exception",
+                {"error": str(e)[:300]},
+            )
     
     # Gather memory context (only for LLM fallback, skip for fast-path)
     memory_context = ""

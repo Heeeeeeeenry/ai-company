@@ -14,3 +14,4 @@ structlog>=24.0
 tenacity>=8.0
 jieba>=0.42
 gnureadline>=8.0  # CJK multi-byte backspace fix on macOS
+Pillow>=10.0

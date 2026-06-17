@@ -533,6 +533,19 @@ class ExecutionRouter:
         if not result.success:
             return result
         output = (result.output or "").strip()
+        if tool_name == "wechat_send":
+            try:
+                parsed = json.loads(output)
+                if isinstance(parsed, dict) and not parsed.get("success", False):
+                    return ToolResult(
+                        success=False,
+                        output=result.output,
+                        error=str(parsed.get("error", "WeChat send failed"))[:200],
+                        mode=result.mode,
+                        metadata=result.metadata,
+                    )
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
         if tool_name == "web_search":
             failure_prefixes = (
                 "SEARCH FAILED",

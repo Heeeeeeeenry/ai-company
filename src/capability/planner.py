@@ -16,10 +16,49 @@ Example:
 
 import json
 import logging
+import os
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Optional
 
 logger = logging.getLogger("ai_company.capability")
+
+
+def _debug_report(hypothesis_id: str, location: str, msg: str, data: Optional[dict] = None) -> None:
+    # #region debug-point B:capability-report
+    env_path = ".dbg/wechat-send-fail.env"
+    server_url = os.environ.get("DEBUG_SERVER_URL", "")
+    session_id = os.environ.get("DEBUG_SESSION_ID", "")
+    run_id = os.environ.get("DEBUG_RUN_ID", "pre-fix")
+    try:
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("DEBUG_SERVER_URL="):
+                    server_url = line.split("=", 1)[1].strip()
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    session_id = line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    if not server_url or not session_id:
+        return
+    payload = {
+        "sessionId": session_id,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "msg": msg,
+        "data": data or {},
+    }
+    try:
+        request = urllib.request.Request(
+            server_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=2).read()
+    except Exception:
+        pass
+    # #endregion
 
 
 @dataclass
@@ -47,6 +86,14 @@ PATTERN_CAPABILITY_MAP = [
         "capabilities": ["file_io", "research"],  # minimal — just need to run+report
         "role_hint": "developer",
         "reasoning": "Shell command execution — run and report output, no code needed",
+    },
+    # WeChat / messaging
+    {
+        "keywords": ["微信", "wechat", "发微信", "发消息", "发送消息", "发送信息",
+                     "微信联系人", "微信好友", "imessage", "发短信"],
+        "capabilities": ["messaging"],
+        "role_hint": "devops",
+        "reasoning": "Local desktop messaging task — requires UI automation / messaging tools",
     },
     # Research & fact-finding
     {
@@ -144,6 +191,17 @@ class CapabilityPlanner:
                     caps = pattern["capabilities"]
                     if available_capabilities:
                         caps = [c for c in caps if c in available_capabilities]
+                    _debug_report(
+                        "B",
+                        "src/capability/planner.py:analyze",
+                        "[DEBUG] Capability planner matched pattern",
+                        {
+                            "task": task[:200],
+                            "keyword": kw,
+                            "role_hint": pattern["role_hint"],
+                            "capabilities": caps,
+                        },
+                    )
                     return CapabilityPlan(
                         capabilities=caps,
                         role_hint=pattern["role_hint"],
@@ -152,6 +210,12 @@ class CapabilityPlanner:
                     )
 
         # ── Fallback: generic research ──
+        _debug_report(
+            "B",
+            "src/capability/planner.py:analyze",
+            "[DEBUG] Capability planner fell back to generic research",
+            {"task": task[:200]},
+        )
         return CapabilityPlan(
             capabilities=["research", "file_io"],
             role_hint="researcher",
@@ -210,7 +274,8 @@ Rules:
 5. filesystem (read_file, write_file, list_dir) for tasks that need directory browsing
 6. vcs (git_commit) only for tasks that need version control
 7. market_data only for financial data queries
-8. role_hint should be the best department: researcher/developer/qa/devops/marketer
+8. messaging only for local message sending tasks like WeChat/iMessage
+9. role_hint should be the best department: researcher/developer/qa/devops/marketer
 
 Example:
 Task: "写一个Python脚本抓取网页"
@@ -218,6 +283,9 @@ Task: "写一个Python脚本抓取网页"
 
 Task: "查一下明天北京天气"
 → {{"capabilities": ["research", "file_io"], "role_hint": "researcher", "reasoning": "Simple fact-finding: search for weather data"}}
+
+Task: "给微信联系人小媛儿宝儿发送消息：多喝水"
+→ {{"capabilities": ["messaging"], "role_hint": "devops", "reasoning": "This is a local WeChat send action, not a web research task"}}
 """
         if not self._llm:
             return self.analyze(task, available_capabilities)

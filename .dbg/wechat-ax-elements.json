@@ -1,0 +1,5 @@
+{
+  "code": 0,
+  "stdout": "1\tAXButton\tAXCloseButton\tmissing value\t关闭按钮\tmissing value2\tAXButton\tAXFullScreenButton\tmissing value\t全屏幕按钮\tmissing value3\tAXButton\tAXMinimizeButton\tmissing value\t最小化按钮\tmissing value\n",
+  "stderr": ""
+}

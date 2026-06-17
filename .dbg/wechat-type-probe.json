@@ -1,0 +1,22 @@
+{
+  "check_wechat": [
+    true,
+    "visible"
+  ],
+  "search_open": [
+    true,
+    "open"
+  ],
+  "find_contact": [
+    true,
+    "entered"
+  ],
+  "open_chat": [
+    true,
+    "verified"
+  ],
+  "type_message": [
+    true,
+    "3xclick input(525,773)"
+  ]
+}

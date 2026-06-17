@@ -1,9 +1,14 @@
 """WeChat Vision Agent — screenshot + Qwen-VL structured analysis."""
 
-import json, os, base64, subprocess, tempfile
-from io import BytesIO
-from PIL import Image
+import json, os, base64, subprocess, tempfile, ctypes
 from typing import Optional
+
+try:
+    from io import BytesIO
+    from PIL import Image
+except Exception:  # Pillow is optional at runtime.
+    BytesIO = None
+    Image = None
 
 
 PROMPT_CHECK_WECHAT = """Analyze this screenshot. Is WeChat visible?
@@ -23,9 +28,12 @@ PROMPT_CHAT_OPEN = """Analyze this WeChat screenshot. Expected chat with: __CONT
 Return ONLY JSON:
 {"chat_open": true/false, "target_name": "name at top", "is_correct_contact": true/false, "input_visible": true/false, "input_center_x": pixel_x, "input_center_y": pixel_y, "confidence": 0.0-1.0}"""
 
-PROMPT_MESSAGE_TYPED = """Analyze this WeChat screenshot. Check if message input contains: __MESSAGE__
+PROMPT_MESSAGE_TYPED = """Analyze this WeChat screenshot. Check whether the BOTTOM chat composer/input box (where a message would be sent to the current chat) contains: __MESSAGE__
+Important:
+- ONLY inspect the bottom message composer in the active chat window.
+- DO NOT treat the left sidebar search box, global search overlay, or any search field as the message input box.
 Return ONLY JSON:
-{"message_in_input": true/false, "input_text": "text visible in input", "confidence": 0.0-1.0}"""
+{"message_in_input": true/false, "input_text": "text visible in the bottom chat composer", "confidence": 0.0-1.0}"""
 
 PROMPT_MESSAGE_SENT = """Analyze this WeChat screenshot. Check if the LAST message in chat is: __MESSAGE__
 Return ONLY JSON:
@@ -47,26 +55,56 @@ class WechatVision:
                 base_url=os.environ.get("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
             )
         return self._client
+
+    def can_capture_screen(self) -> bool:
+        """Best-effort macOS Screen Recording preflight."""
+        try:
+            cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+            cg.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+            return bool(cg.CGPreflightScreenCaptureAccess())
+        except Exception:
+            # If the API is unavailable, avoid blocking the flow on a false negative.
+            return True
     
-    def _capture(self) -> Image.Image:
+    def _capture(self) -> bytes:
         fd, path = tempfile.mkstemp(suffix=".png")
         os.close(fd)
         try:
             subprocess.run(["screencapture", "-x", path], capture_output=True, timeout=5)
-            img = Image.open(path).convert("RGB")
-            img.load()
-            return img
+            if Image is not None and BytesIO is not None:
+                img = Image.open(path).convert("RGB")
+                img.load()
+                w, h = img.size
+                if w > 1280:
+                    img = img.resize((1280, int(h * 1280 / w)), Image.LANCZOS)
+                buf = BytesIO()
+                img.save(buf, format="JPEG", quality=70)
+                return buf.getvalue()
+
+            # Fallback: use macOS sips to resize/compress without Pillow.
+            resized_path = f"{path}.jpg"
+            subprocess.run(
+                ["sips", "-Z", "1280", "-s", "format", "jpeg", path, "--out", resized_path],
+                capture_output=True,
+                timeout=10,
+            )
+            output_path = resized_path if os.path.exists(resized_path) else path
+            with open(output_path, "rb") as handle:
+                return handle.read()
         finally:
-            try: os.unlink(path)
-            except OSError: pass
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            try:
+                os.unlink(f"{path}.jpg")
+            except OSError:
+                pass
     
-    def _ask(self, image: Image.Image, prompt: str, max_tokens: int = 200) -> Optional[dict]:
-        w, h = image.size
-        if w > 1280:
-            image = image.resize((1280, int(h * 1280 / w)), Image.LANCZOS)
-        buf = BytesIO()
-        image.save(buf, format="JPEG", quality=70)
-        b64 = base64.b64encode(buf.getvalue()).decode()
+    def _ask(self, image_bytes: bytes, prompt: str, max_tokens: int = 200) -> Optional[dict]:
+        if not image_bytes:
+            return None
+        b64 = base64.b64encode(image_bytes).decode()
         try:
             client = self._get_client()
             resp = client.chat.completions.create(

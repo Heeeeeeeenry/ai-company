@@ -1,0 +1,21 @@
+{
+  "screen_capture_access": true,
+  "can_control_ui": true,
+  "window_state": {
+    "window_count": 1,
+    "frontmost": true,
+    "visible": true,
+    "minimized": false,
+    "main": true,
+    "focused": false,
+    "position": [
+      57,
+      109
+    ],
+    "size": [
+      937,
+      689
+    ]
+  },
+  "can_capture_screen": true
+}

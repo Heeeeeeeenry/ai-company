@@ -1,0 +1,14 @@
+{
+  "/Users/v_liheng02/Library/Application Support/com.apple.TCC/TCC.db": {
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: unable to open database \"/Users/v_liheng02/Library/Application Support/com.apple.TCC/TCC.db\": authorization denied\n",
+    "exists": true
+  },
+  "/Library/Application Support/com.apple.TCC/TCC.db": {
+    "code": 1,
+    "stdout": "",
+    "stderr": "Error: unable to open database \"/Library/Application Support/com.apple.TCC/TCC.db\": authorization denied\n",
+    "exists": true
+  }
+}
