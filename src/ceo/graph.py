@@ -138,6 +138,19 @@ def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
     if not task or not re.search(r"微信|wechat|发消息|发微信|发信息|发送消息|发送信息|告诉", task, re.IGNORECASE):
         return None
 
+    # ═══ Combined patterns (contact+message in one regex) ═══
+    combined_patterns = [
+        # "微信发送消息给CONTACT说 MESSAGE" / "微信给CONTACT发消息说 MESSAGE"
+        r"微信(?:发送消息|发消息|发微信)?给\s*([^说，。:：\n]+?)\s*(?:发消息|发微信|发送消息)?\s*说\s*(.+)$",
+    ]
+    for pattern in combined_patterns:
+        match = re.search(pattern, task, re.IGNORECASE)
+        if match:
+            contact = _strip_wrapping_quotes(match.group(1))
+            message = _strip_wrapping_quotes(match.group(2))
+            if contact and message:
+                return contact, message
+
     quoted_parts = [
         _strip_wrapping_quotes(m.group(1))
         for m in re.finditer(r'["“”「『](.+?)["””」』]', task)

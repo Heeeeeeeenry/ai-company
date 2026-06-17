@@ -166,10 +166,11 @@ class WechatCoordinator:
             self.action.type_text(contact)
             time.sleep(1.5)
 
-            # Verify contact appears in search results via Qwen-VL
+            # Verify contact appears in search results via Qwen-VL (exact match only)
             vision_result = self.vision.find_contact(contact)
-            if not vision_result or not vision_result.get("found"):
-                logger.warning("Vision: contact '%s' not confirmed in search (attempt %d)", contact, attempt+1)
+            if not vision_result or not vision_result.get("found") or not vision_result.get("is_exact_match"):
+                logger.warning("Vision: contact '%s' not exactly found (attempt %d): %s", 
+                             contact, attempt+1, vision_result.get("contact_name","?") if vision_result else "None")
                 self.action.clear_search_text()
                 time.sleep(0.5)
                 continue
