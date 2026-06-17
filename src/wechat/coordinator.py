@@ -35,17 +35,13 @@ class WechatCoordinator:
         message = message[:500]
         start = time.time()
         
-        # ─── Strategy: sidebar-first, search-fallback ───
-        # Sidebar navigation (Cmd+1 → Down Arrow) is more reliable than
-        # search (Cmd+F → paste → Enter) because:
-        #   1. 文件传输助手 Enter triggers 搜一搜 instead of opening chat
-        #   2. Search dropdown can close before vision-guided click lands
-        #   3. Sidebar avoids garbage prefix from Cmd+A+Delete in search box
-        result = self._try_sidebar_navigation(contact, message, timeout, start)
-        if result is not None:
-            return result
+        # ─── SPECIAL: 文件传输助手 ───
+        # Cannot be opened via search (Enter triggers 搜一搜 web search).
+        # Must use sidebar chat list: Cmd+1 → Down Arrow → Enter
+        if contact == "文件传输助手":
+            return self._send_to_file_transfer(message, timeout, start)
         
-        # ─── Fallback: search flow ───
+        # ─── Normal contacts ───
         
         # STATE 1: Check WeChat
         ok, detail = self._ensure_wechat_visible()
@@ -246,83 +242,80 @@ class WechatCoordinator:
                 return True, "verified"
         return False, "Message not verified as sent"
 
-    # ─── Sidebar-first navigation (unified) ───
+    # ─── 文件传输助手 special handler ───
     
-    SIDEBAR_MAX_POSITION = 5  # Maximum Down Arrow attempts
-    
-    def _try_sidebar_navigation(
-        self, contact: str, message: str, timeout: int, start: float
-    ) -> Optional[dict]:
-        """Try opening contact via sidebar chat list (Cmd+1 → Down×N → Enter).
+    def _send_to_file_transfer(self, message: str, timeout: int, start: float) -> dict:
+        """Send to 文件传输助手 via sidebar chat list navigation.
         
-        Returns result dict on success, None on failure (caller falls back to search).
-        Tries positions 0..SIDEBAR_MAX_POSITION, verifying each with Qwen-VL.
+        WeChat macOS design: 文件传输助手 is a 功能 (function) entry, not a contact.
+        Search + Enter triggers 搜一搜 web search instead of opening the chat.
+        The only reliable way: Cmd+1 → sidebar → Down Arrow ×1 → Enter.
+        (文件传输助手 is consistently the 2nd entry in the chat list.)
         """
+        import subprocess as _sp
+        
+        # Ensure WeChat is running
         ok, detail = self._ensure_wechat_visible()
         if not ok:
             return {"success": False, "state": "CHECK_WECHAT", "error": detail}
         
-        for down_count in range(self.SIDEBAR_MAX_POSITION + 1):
-            if time.time() - start > timeout:
-                return {"success": False, "state": "TIMEOUT", "error": "Timeout in sidebar nav"}
-            
-            # Close any panels
+        for attempt in range(self.MAX_RETRIES_PER_STATE):
+            # Close any search panels
             self.action.press_esc()
             time.sleep(0.3)
             self.action.press_esc()
-            time.sleep(0.2)
+            time.sleep(0.3)
             
             # Cmd+1 → Chat list tab
             self.action._run('''tell application "System Events"
                 tell process "WeChat"
                     keystroke "1" using command down
-                    delay 0.5
+                    delay 0.8
+                end tell
+            end tell
+            return "ok"''')
+            time.sleep(0.5)
+            
+            # Down Arrow → select 文件传输助手 (2nd entry)
+            self.action._run('''tell application "System Events"
+                tell process "WeChat"
+                    key code 125
+                    delay 0.3
                 end tell
             end tell
             return "ok"''')
             time.sleep(0.3)
-            
-            # Down Arrow × N (skip for N=0: first chat auto-selected)
-            for _ in range(down_count):
-                self.action._run('''tell application "System Events"
-                    tell process "WeChat"
-                        key code 125
-                        delay 0.2
-                    end tell
-                end tell
-                return "ok"''')
-                time.sleep(0.15)
             
             # Enter → open chat
             self.action.press_enter()
             time.sleep(1.5)
             
             if time.time() - start > timeout:
-                return {"success": False, "state": "TIMEOUT", "error": "Timeout after sidebar Enter"}
+                return {"success": False, "state": "TIMEOUT", "error": "Timeout"}
             
-            # Verify with Qwen-VL
-            result = self.vision.check_chat_open(contact)
+            # Verify chat is open with 文件传输助手
+            result = self.vision.check_chat_open("文件传输助手")
             if result and result.get("chat_open") and result.get("is_correct_contact"):
-                logger.info("Sidebar navigation: found '%s' at Down×%d", contact, down_count)
                 break
             
-            # Check if we just opened a different chat that starts with the contact name
-            target = result.get("target_name", "") if result else ""
-            if contact in str(target):
-                logger.info("Sidebar: partial match '%s' at Down×%d, accepting", target, down_count)
-                break
+            logger.warning("File transfer chat not open (attempt %d), retrying...", attempt + 1)
+            time.sleep(0.5)
         else:
-            # All positions exhausted
-            return None  # Signal caller to fall back to search
+            return {"success": False, "state": "OPEN_CHAT", 
+                    "error": "Cannot open 文件传输助手 chat via sidebar"}
         
         if time.time() - start > timeout:
-            return {"success": False, "state": "TIMEOUT", "error": "Timeout after sidebar find"}
+            return {"success": False, "state": "TIMEOUT", "error": "Timeout after open"}
         
-        # Type and send
+        # Type message (pbcopy + Cmd+V)
         ok, detail = self._type_and_verify_message(message)
         if not ok:
             return {"success": False, "state": "SEND_MESSAGE", "error": detail}
         
+        if time.time() - start > timeout:
+            return {"success": False, "state": "TIMEOUT", "error": "Timeout after type"}
+        
+        # Send and verify
         ok, detail = self._send_and_verify(message)
         if not ok:
             return {"success": False, "state": "VERIFY_SENT", "error": detail}
@@ -330,9 +323,9 @@ class WechatCoordinator:
         elapsed = time.time() - start
         return {
             "success": True,
-            "contact": contact,
+            "contact": "文件传输助手",
             "message": message,
-            "output": f"Sent to {contact} via sidebar",
+            "output": "Sent to 文件传输助手",
             "elapsed": round(elapsed, 1),
         }
 
