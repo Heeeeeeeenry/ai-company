@@ -35,13 +35,9 @@ class WechatCoordinator:
         message = message[:500]
         start = time.time()
         
-        # ─── SPECIAL: 文件传输助手 ───
-        # Cannot be opened via search (Enter triggers 搜一搜 web search).
-        # Must use sidebar chat list: Cmd+1 → Down Arrow → Enter
-        if contact == "文件传输助手":
-            return self._send_to_file_transfer(message, timeout, start)
-        
-        # ─── Normal contacts ───
+        # ─── Normal flow (handles all contacts including 文件传输助手) ───
+        # Note: 文件传输助手 opens via search + vision-click (not Enter),
+        # handled in _find_and_select_contact below.
         
         # STATE 1: Check WeChat
         ok, detail = self._ensure_wechat_visible()
@@ -272,101 +268,6 @@ class WechatCoordinator:
         
         return False, "Message not verified as sent"
 
-    # ─── 文件传输助手 special handler ───
-    
-    def _send_to_file_transfer(self, message: str, timeout: int, start: float) -> dict:
-        """Send to 文件传输助手 via sidebar chat list navigation.
-        
-        WeChat macOS: 文件传输助手 is a 功能 entry, Search+Enter = 搜一搜.
-        Strategy: Cmd+1 → use vision to find and click the entry in sidebar.
-        """
-        # Ensure WeChat is running
-        ok, detail = self._ensure_wechat_visible()
-        if not ok:
-            return {"success": False, "state": "CHECK_WECHAT", "error": detail}
-        
-        for attempt in range(self.MAX_RETRIES_PER_STATE + 2):  # extra retries
-            # Close any panels
-            self.action.press_esc()
-            time.sleep(0.3)
-            self.action.press_esc()
-            time.sleep(0.3)
-            
-            # Cmd+1 → Chat list tab
-            self.action._run(
-                'tell application "System Events"\n'
-                '    tell process "WeChat"\n'
-                '        keystroke "1" using command down\n'
-                '        delay 0.8\n'
-                '    end tell\n'
-                'end tell'
-            )
-            time.sleep(0.8)
-            
-            if time.time() - start > timeout:
-                return {"success": False, "state": "TIMEOUT", "error": "Timeout"}
-            
-            # Try vision-guided click on 文件传输助手 in sidebar
-            pos = self.vision.find_contact_position("文件传输助手")
-            if pos and pos.get("screen_x"):
-                logger.info("Clicking 文件传输助手 at screen (%d, %d)", 
-                           pos["screen_x"], pos["screen_y"])
-                self.action.click(pos["screen_x"], pos["screen_y"])
-                time.sleep(2)
-            else:
-                # Fallback: Down Arrow ×1 then Enter
-                logger.warning("Vision couldn't locate 文件传输助手, trying Down+Enter")
-                self.action._run(
-                    'tell application "System Events"\n'
-                    '    tell process "WeChat"\n'
-                    '        key code 125\n'
-                    '        delay 0.3\n'
-                    '    end tell\n'
-                    'end tell'
-                )
-                time.sleep(0.3)
-                self.action.press_enter()
-                time.sleep(2)
-            
-            if time.time() - start > timeout:
-                return {"success": False, "state": "TIMEOUT", "error": "Timeout"}
-            
-            # Verify
-            result = self.vision.check_chat_open("文件传输助手")
-            if result and result.get("chat_open") and result.get("is_correct_contact"):
-                break
-            
-            logger.warning("File transfer chat not open (attempt %d), retrying...", attempt + 1)
-            time.sleep(1)
-        else:
-            return {"success": False, "state": "OPEN_CHAT",
-                    "error": "Cannot open 文件传输助手 chat via sidebar"}
-        
-        if time.time() - start > timeout:
-            return {"success": False, "state": "TIMEOUT", "error": "Timeout after open"}
-        
-        # Type message (pbcopy + Cmd+V)
-        ok, detail = self._type_and_verify_message(message)
-        if not ok:
-            return {"success": False, "state": "SEND_MESSAGE", "error": detail}
-        
-        if time.time() - start > timeout:
-            return {"success": False, "state": "TIMEOUT", "error": "Timeout after type"}
-        
-        # Send and verify
-        ok, detail = self._send_and_verify(message)
-        if not ok:
-            return {"success": False, "state": "VERIFY_SENT", "error": detail}
-        
-        elapsed = time.time() - start
-        return {
-            "success": True,
-            "contact": "文件传输助手",
-            "message": message,
-            "output": "Sent to 文件传输助手",
-            "elapsed": round(elapsed, 1),
-        }
-    
     # ─── Quick send (already in chat, skip search/navigation) ───
     
     def quick_send(self, message: str, timeout: int = 30) -> dict:
