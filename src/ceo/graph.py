@@ -202,6 +202,40 @@ def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def _extract_wechat_conversation_request(task: str) -> Optional[tuple[str, Optional[int]]]:
+    """Extract (contact, max_turns) from natural-language conversation/reply requests.
+    
+    Matches: "帮我跟XX聊天" / "替我回复XX" / "和XX聊几句" / "代聊XX 3轮"
+    """
+    task = (task or "").strip()
+    if not task or not re.search(r"聊天|回复|代聊|帮我.*聊|替.*回复|聊几句|自动回复", task, re.IGNORECASE):
+        return None
+    
+    # Extract max_turns
+    max_turns = None
+    turns_match = re.search(r"(\d+)\s*(?:轮|句|次|个来回)", task)
+    if turns_match:
+        max_turns = int(turns_match.group(1))
+    
+    # Extract contact name
+    contact_patterns = [
+        # "帮我跟XX聊天" / "替我回复XX" / "帮我回复XX"
+        r"(?:帮|替)\s*(?:我\s*)?(?:跟|和|回复)\s*([^\s，。:：\d聊代]+)",
+        # "跟XX聊天" / "和XX聊几句" / "和XX自动回复"
+        r"(?:跟|和)\s*([^\s，。:：\d聊代]+?)\s*(?:聊天|聊几句|聊|自动回复|$)",
+        # "回复XX" / "代聊XX 3轮"
+        r"(?:回复|代聊)\s*([^\s，。:：\d聊代]+)",
+    ]
+    for pattern in contact_patterns:
+        match = re.search(pattern, task, re.IGNORECASE)
+        if match:
+            contact = _strip_wrapping_quotes(match.group(1))
+            if contact:
+                return contact.strip(), max_turns
+    
+    return None
+
+
 def _debug_report(hypothesis_id: str, location: str, msg: str, data: Optional[dict] = None) -> None:
     # #region debug-point A:wechat-triage-report
     env_path = ".dbg/wechat-send-fail.env"
@@ -378,6 +412,32 @@ async def triage_node(state: CEOState) -> dict:
     
     # ═══ WeChat Send Fast-Path: direct execution, no agent loop ═══
     task = state.get("user_request", "")
+    
+    # ─── Conversation Fast-Path (AI-powered chat) ───
+    conv_request = _extract_wechat_conversation_request(task)
+    if conv_request:
+        contact, max_turns = conv_request
+        max_turns = max_turns or 3  # default 3 turns
+        try:
+            from src.wechat.conversation import Conversation
+            conv = Conversation(contact)
+            replies = conv.listen_and_reply(max_turns=max_turns, poll_interval=3.0)
+            reply_summary = f"与{contact}对话完成，共回复{len(replies)}条消息"
+            return {
+                "phase": "deliver",
+                "department": "devops",
+                "task_type": "LOCAL_SYSTEM",
+                "final_output": reply_summary,
+                "score_card": {"score": 95, "decision": "APPROVE", "final_score": 95,
+                              "next_action": "deliver"},
+                "execution_log": [f"[TRIAGE] Conversation fast-path: {contact}, {len(replies)} replies"],
+            }
+        except Exception as e:
+            import logging
+            logging.getLogger("ai_company").warning(
+                "Conversation fast-path failed, falling back: %s", e,
+            )
+    
     wechat_request = _extract_wechat_send_request(task)
     _debug_report(
         "A",

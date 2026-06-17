@@ -349,6 +349,58 @@ class WechatCoordinator:
             "output": "Sent to 文件传输助手",
             "elapsed": round(elapsed, 1),
         }
+    
+    # ─── Quick send (already in chat, skip search/navigation) ───
+    
+    def quick_send(self, message: str, timeout: int = 30) -> dict:
+        """Send message assuming we're already in the correct chat window.
+        
+        Skips states 1-4 (WeChat check, search, find contact, open chat).
+        Only does: click input → type → send → verify.
+        
+        Much faster than full send() — ~12-15s vs ~30s.
+        """
+        message = message[:500]
+        start = time.time()
+        
+        # Fast check: is WeChat still responsive?
+        rect = self.action.get_window_rect()
+        if not rect:
+            return {"success": False, "state": "CHECK_WECHAT", 
+                    "error": "WeChat window not found"}
+        
+        if time.time() - start > timeout:
+            return {"success": False, "state": "TIMEOUT", "error": "Timeout"}
+        
+        # Type message directly (assumes focus is in input field or can be clicked)
+        ok, detail = self._type_and_verify_message(message)
+        if not ok:
+            return {"success": False, "state": "SEND_MESSAGE", "error": detail}
+        
+        if time.time() - start > timeout:
+            return {"success": False, "state": "TIMEOUT", "error": "Timeout after type"}
+        
+        # Send and verify
+        ok, detail = self._send_and_verify(message)
+        if not ok:
+            # Final safety check (same as full send)
+            logger.warning("Quick send: verify failed, delayed check...")
+            time.sleep(2)
+            sent_result = self.vision.check_message_sent(message)
+            if sent_result and sent_result.get("sent") and sent_result.get("is_expected_message"):
+                logger.info("VISION: message was already sent (belated)")
+                ok, detail = True, "verified (delayed)"
+        
+        if not ok:
+            return {"success": False, "state": "VERIFY_SENT", "error": detail}
+        
+        elapsed = time.time() - start
+        return {
+            "success": True,
+            "message": message,
+            "output": "Sent",
+            "elapsed": round(elapsed, 1),
+        }
 
 
 def send_wechat_message(contact: str, message: str) -> dict:
