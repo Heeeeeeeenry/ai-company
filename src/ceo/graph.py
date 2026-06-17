@@ -135,7 +135,7 @@ def _strip_wrapping_quotes(text: str) -> str:
 def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
     """Extract (contact, message) from natural-language WeChat send requests."""
     task = (task or "").strip()
-    if not task or not re.search(r"微信|wechat", task, re.IGNORECASE):
+    if not task or not re.search(r"微信|wechat|发消息|发微信|发信息|发送消息|发送信息|告诉", task, re.IGNORECASE):
         return None
 
     quoted_parts = [
@@ -148,9 +148,13 @@ def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
     message = ""
     message_match = None
     message_patterns = [
-        r"(?:发送消息|发消息|发送信息|发信息)\s*(?:给[^，,：:\n]*)?[：:]\s*(.+)$",
+        # "发微信: MESSAGE" / "发消息: MESSAGE"
+        r"(?:发微信|发消息|发送消息|发送信息|发信息)\s*[：:：]\s*(.+)$",
+        r"(?:说|内容是|内容为|告诉)\s*[：:：]\s*(.+)$",
         r"(?:发送消息|发消息|发送信息|发信息)\s+(.+)$",
-        r"(?:说|内容是|内容为)\s*[：:]\s*(.+)$",
+        r"(?:发微信|发消息)\s+(.+)$",
+        # Bare text after comma: "给CONTACT发微信，MESSAGE"
+        r"[，,。]\s*(.+)$",
     ]
     for pattern in message_patterns:
         match = re.search(pattern, task, re.IGNORECASE)
@@ -163,7 +167,11 @@ def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
     search_text = task[:message_match.start()] if message_match else task
     contact = ""
     contact_patterns = [
+        # "给CONTACT发微信" / "给CONTACT发消息" — stop before 发微信/发消息
+        r"(?:给|发给|发送给|告诉)\s*([^，。:：\n]+?)(?=发微信|发消息|发送消息|发信息|发送信息|$)",
+        # "给我的微信好友 CONTACT" / "给微信联系人 CONTACT"
         r"(?:给我的微信(?:好友|联系人)?|给微信(?:好友|联系人)?|给(?:好友|联系人)?)\s*[：:，,\s]*([^，。:：\n]+)",
+        # "微信发送消息给CONTACT"
         r"(?:微信(?:发送消息)?给)\s*([^，。:：\n]+)",
         r"(?:联系人)\s*[：:，,\s]*([^，。:：\n]+)",
     ]
