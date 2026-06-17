@@ -8,6 +8,14 @@ import sys, json
 import os
 import urllib.request
 
+# Ensure .env is loaded for Qwen-VL vision verification
+try:
+    from dotenv import load_dotenv
+    _env_path = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+    load_dotenv(_env_path)
+except Exception:
+    pass
+
 
 def _debug_report(hypothesis_id: str, location: str, msg: str, data: dict | None = None) -> None:
     # #region debug-point C:wechat-tool-report

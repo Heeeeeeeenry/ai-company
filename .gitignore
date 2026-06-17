@@ -35,3 +35,6 @@ data/
 
 # QA reports (optional - generated audit files)
 qa_reports/__pycache__/
+.dbg/
+debug-*.md
+tmp*.png

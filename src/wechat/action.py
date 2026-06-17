@@ -25,14 +25,22 @@ OPEN_SEARCH = '''tell application "System Events"
 end tell
 return "ok"'''
 
-TYPE_TEXT = '''tell application "System Events"
+# NOTE: TYPE_TEXT is deprecated — keystroke cannot input Chinese.
+# Use _paste_via_clipboard() instead (pbcopy + Cmd+V).
+CMD_V_PASTE = '''tell application "System Events"
     tell process "WeChat"
-        set the clipboard to "{text}"
-        delay 0.2
-        keystroke "a" using command down
-        delay 0.1
         keystroke "v" using command down
         delay 0.3
+    end tell
+end tell
+return "ok"'''
+
+CLEAR_SEARCH = '''tell application "System Events"
+    tell process "WeChat"
+        keystroke "a" using command down
+        delay 0.1
+        key code 51
+        delay 0.2
     end tell
 end tell
 return "ok"'''
@@ -112,10 +120,27 @@ class WechatAction:
     def open_search(self) -> bool:
         return self._run(OPEN_SEARCH)
     
+    def _paste_via_clipboard(self, text: str) -> bool:
+        """Set clipboard via pbcopy, then Cmd+V paste (supports Chinese)."""
+        try:
+            subprocess.run(['pbcopy'], input=text.encode('utf-8'), timeout=3)
+        except Exception:
+            return False
+        return self._run(CMD_V_PASTE)
+
     def type_text(self, text: str) -> bool:
+        """Paste text via clipboard (pbcopy + Cmd+V). Supports Chinese characters.
+        
+        The old keystroke approach produced garbage for non-ASCII text because
+        macOS AppleScript keystroke works at the keyboard layout level — Chinese
+        IME requires pbcopy + paste instead.
+        """
         text = text[:500]
-        escaped = text.replace('"', '\\"')
-        return self._run(TYPE_TEXT.format(text=escaped))
+        return self._paste_via_clipboard(text)
+
+    def clear_search_text(self) -> bool:
+        """Clear search box text with Cmd+A then Delete."""
+        return self._run(CLEAR_SEARCH)
     
     def press_enter(self) -> bool:
         return self._run(PRESS_ENTER)
@@ -141,9 +166,19 @@ class WechatAction:
         return None
     
     def click_input_field(self) -> bool:
-        """Click message input field (center, 25px from bottom)."""
+        """Click message input field (center of RIGHT panel, ~40px from bottom).
+
+        WeChat layout: left sidebar (~280px chat list) + right panel (chat+input).
+        The window center (wx+ww/2) falls inside the sidebar, NOT the input field.
+        We offset by ~30% of window width to land in the right panel's input area.
+        """
         rect = self.get_window_rect()
         if rect is None:
             return False
         wx, wy, ww, wh = rect
-        return self.click(wx + ww // 2, wy + wh - 25)
+        # Sidebar is ~30% of window width on macOS WeChat
+        sidebar_ratio = 0.30
+        right_panel_left = wx + int(ww * sidebar_ratio)
+        right_panel_center = right_panel_left + int(ww * (1.0 - sidebar_ratio) / 2)
+        # Click ~40px from bottom of window (inside input area)
+        return self.click(right_panel_center, wy + wh - 40)

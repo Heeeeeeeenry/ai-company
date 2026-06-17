@@ -35,6 +35,14 @@ class WechatCoordinator:
         message = message[:500]
         start = time.time()
         
+        # ─── SPECIAL: 文件传输助手 ───
+        # Cannot be opened via search (Enter triggers 搜一搜 web search).
+        # Must use sidebar chat list: Cmd+1 → Down Arrow → Enter
+        if contact == "文件传输助手":
+            return self._send_to_file_transfer(message, timeout, start)
+        
+        # ─── Normal contacts ───
+        
         # STATE 1: Check WeChat
         ok, detail = self._ensure_wechat_visible()
         if not ok:
@@ -98,90 +106,130 @@ class WechatCoordinator:
     # ─── State implementations ───
     
     def _ensure_wechat_visible(self) -> tuple:
-        """STATE 1: Make sure WeChat is open and focused."""
+        """STATE 1: Make sure WeChat is open and focused (CLI-first)."""
+        import subprocess
         for attempt in range(self.MAX_RETRIES_PER_STATE):
+            # Fast check: is WeChat running?
+            try:
+                r = subprocess.run(["pgrep", "-l", "WeChat"], capture_output=True, text=True, timeout=3)
+                if r.returncode != 0:
+                    subprocess.run(["open", "-a", "WeChat"], timeout=5)
+                    time.sleep(3)
+                    continue
+            except Exception:
+                pass
+            
+            # Activate and check for window
+            self.action.activate()
+            time.sleep(2)
+            rect = self.action.get_window_rect()
+            if rect:
+                return True, f"window at {rect}"
+            
+            time.sleep(1)
+        
+        # Fallback: try vision check
+        try:
             result = self.vision.check_wechat()
             if result and result.get("wechat_visible"):
-                return True, "visible"
-            # Try activating
-            self.action.activate()
-            time.sleep(1.5)
+                return True, "vision"
+        except Exception:
+            pass
+        
         return False, "WeChat not visible after retries"
     
     def _ensure_search_open(self) -> tuple:
-        """STATE 2: Open search box."""
+        """STATE 2: Open search box, clear old text, verify with vision."""
         for attempt in range(self.MAX_RETRIES_PER_STATE):
             self.action.open_search()
             time.sleep(1)
+            # Clear any residual text from previous search (Agent A finding #4)
+            self.action.clear_search_text()
+            time.sleep(0.3)
+            # Verify search box is open via vision
             result = self.vision.check_search_box()
             if result and result.get("search_open"):
-                return True, "open"
-        return False, "Search box not opening"
+                return True, f"search box visible (attempt {attempt+1})"
+            time.sleep(1)
+        return False, "Search box not opening after retries"
     
     def _find_and_select_contact(self, contact: str) -> tuple:
-        """STATE 3: Type contact, verify, select via Enter."""
+        """STATE 3: Type contact name, verify in results, open chat.
+
+        For "文件传输助手": Enter opens 搜一搜 web search → use vision-guided
+        click instead.  For normal contacts: press Enter after vision confirms.
+        """
+        is_file_transfer = (contact == "文件传输助手")
+
         for attempt in range(self.MAX_RETRIES_PER_STATE):
+            # Type contact name (pbcopy + Cmd+V — supports Chinese)
             self.action.type_text(contact)
             time.sleep(1.5)
-            
-            result = self.vision.find_contact(contact)
-            if not result:
+
+            # Verify contact appears in search results via Qwen-VL
+            vision_result = self.vision.find_contact(contact)
+            if not vision_result or not vision_result.get("found"):
+                logger.warning("Vision: contact '%s' not confirmed in search (attempt %d)", contact, attempt+1)
+                self.action.clear_search_text()
+                time.sleep(0.5)
                 continue
-            
-            if not result.get("found"):
+
+            logger.info("Vision: contact '%s' found in search results", contact)
+
+            if is_file_transfer:
+                # SPECIAL: 文件传输助手 — Enter triggers 搜一搜 instead of opening chat.
+                # Use vision-guided click on the contact in the sidebar/search results.
+                pos = self.vision.find_contact_position(contact)
+                if pos and pos.get("screen_x"):
+                    logger.info("Clicking 文件传输助手 at screen (%d, %d)", pos["screen_x"], pos["screen_y"])
+                    self.action.click(pos["screen_x"], pos["screen_y"])
+                    time.sleep(2)
+                    return True, f"clicked at ({pos['screen_x']}, {pos['screen_y']})"
+                # Fallback: try Enter anyway (might work on some WeChat versions)
+                logger.warning("Vision click position unavailable, falling back to Enter")
                 self.action.press_enter()
-                time.sleep(1)
-                continue
-            
-            if not result.get("is_individual_contact"):
-                self.action.press_enter()
-                time.sleep(1)
-                continue
-            
-            # Select via Enter (verified reliable for contact results)
+                time.sleep(2)
+                return True, "entered (fallback)"
+
+            # Normal contact: press Enter to open chat
             self.action.press_enter()
             time.sleep(2)
             return True, "entered"
-        
-        return False, f"Contact '{contact}' not found as individual contact"
+
+        return False, f"Contact '{contact}' not found in search results"
     
     def _verify_chat_open(self, contact: str) -> tuple:
-        """STATE 4: Verify chat window is open with correct contact."""
+        """STATE 4: Verify chat window is open with correct contact using Qwen-VL."""
         for attempt in range(self.MAX_RETRIES_PER_STATE):
             result = self.vision.check_chat_open(contact)
             if result and result.get("chat_open") and result.get("is_correct_contact"):
-                return True, "verified"
+                return True, f"chat open with '{result.get('target_name', contact)}' (attempt {attempt+1})"
+            logger.warning("Vision: chat not confirmed open for '%s' (attempt %d)", contact, attempt+1)
             time.sleep(1)
-        return False, "Chat not open with correct contact"
-    
+        return False, f"Chat not open with '{contact}' after retries"
+
     def _type_and_verify_message(self, message: str) -> tuple:
-        """STATE 5: Dismiss search overlay, click input, type."""
-        rect = self.action.get_window_rect()
-        if not rect:
-            return False, "No window rect"
-        wx, wy, ww, wh = rect
-        # First click chat area CENTER to dismiss search panel overlay
-        cx = wx + ww // 2
-        cy = wy + int(wh * 0.5)
-        # Then click input field
-        ix = wx + ww // 2
-        iy = wy + wh - 25
-        
+        """STATE 5: Click input field, select all (replace garbage), paste message, verify."""
         for attempt in range(self.MAX_RETRIES_PER_STATE):
-            # ESC to dismiss search
-            self.action.press_esc()
-            time.sleep(0.8)
-            # Triple click input field at exact bottom position
-            self.action.click(ix, iy)
+            # Click the input field first to ensure focus
+            self.action.click_input_field()
             time.sleep(0.3)
-            self.action.click(ix, iy)
-            time.sleep(0.3)
-            self.action.click(ix, iy)
-            time.sleep(0.8)
+
+            # Cmd+A to select all existing text (clears garbage from search operations)
+            self.action.clear_search_text()  # Reuses Cmd+A+Delete pattern
+            time.sleep(0.1)
+
+            # Paste message via clipboard (pbcopy + Cmd/V — Chinese-safe)
             self.action.type_text(message)
-            time.sleep(0.5)
-            return True, f"3xclick input({ix},{iy})"
-        return False, "Message not typed"
+            time.sleep(0.8)
+
+            # Verify message is in input box via vision
+            result = self.vision.check_message_typed(message)
+            if result and result.get("message_in_input"):
+                return True, f"message in input box (attempt {attempt+1})"
+            logger.warning("Vision: message not confirmed in input box (attempt %d)", attempt+1)
+            time.sleep(1)
+        return False, "Message not confirmed in input box"
     
     def _send_and_verify(self, message: str) -> tuple:
         """STATE 6: Press Enter and verify message in chat."""
@@ -193,6 +241,93 @@ class WechatCoordinator:
             if result and result.get("sent") and result.get("is_expected_message"):
                 return True, "verified"
         return False, "Message not verified as sent"
+
+    # ─── 文件传输助手 special handler ───
+    
+    def _send_to_file_transfer(self, message: str, timeout: int, start: float) -> dict:
+        """Send to 文件传输助手 via sidebar chat list navigation.
+        
+        WeChat macOS design: 文件传输助手 is a 功能 (function) entry, not a contact.
+        Search + Enter triggers 搜一搜 web search instead of opening the chat.
+        The only reliable way: Cmd+1 → sidebar → Down Arrow ×1 → Enter.
+        (文件传输助手 is consistently the 2nd entry in the chat list.)
+        """
+        import subprocess as _sp
+        
+        # Ensure WeChat is running
+        ok, detail = self._ensure_wechat_visible()
+        if not ok:
+            return {"success": False, "state": "CHECK_WECHAT", "error": detail}
+        
+        for attempt in range(self.MAX_RETRIES_PER_STATE):
+            # Close any search panels
+            self.action.press_esc()
+            time.sleep(0.3)
+            self.action.press_esc()
+            time.sleep(0.3)
+            
+            # Cmd+1 → Chat list tab
+            self.action._run('''tell application "System Events"
+                tell process "WeChat"
+                    keystroke "1" using command down
+                    delay 0.8
+                end tell
+            end tell
+            return "ok"''')
+            time.sleep(0.5)
+            
+            # Down Arrow → select 文件传输助手 (2nd entry)
+            self.action._run('''tell application "System Events"
+                tell process "WeChat"
+                    key code 125
+                    delay 0.3
+                end tell
+            end tell
+            return "ok"''')
+            time.sleep(0.3)
+            
+            # Enter → open chat
+            self.action.press_enter()
+            time.sleep(1.5)
+            
+            if time.time() - start > timeout:
+                return {"success": False, "state": "TIMEOUT", "error": "Timeout"}
+            
+            # Verify chat is open with 文件传输助手
+            result = self.vision.check_chat_open("文件传输助手")
+            if result and result.get("chat_open") and result.get("is_correct_contact"):
+                break
+            
+            logger.warning("File transfer chat not open (attempt %d), retrying...", attempt + 1)
+            time.sleep(0.5)
+        else:
+            return {"success": False, "state": "OPEN_CHAT", 
+                    "error": "Cannot open 文件传输助手 chat via sidebar"}
+        
+        if time.time() - start > timeout:
+            return {"success": False, "state": "TIMEOUT", "error": "Timeout after open"}
+        
+        # Type message (pbcopy + Cmd+V)
+        ok, detail = self._type_and_verify_message(message)
+        if not ok:
+            return {"success": False, "state": "SEND_MESSAGE", "error": detail}
+        
+        if time.time() - start > timeout:
+            return {"success": False, "state": "TIMEOUT", "error": "Timeout after type"}
+        
+        # Send and verify
+        ok, detail = self._send_and_verify(message)
+        if not ok:
+            return {"success": False, "state": "VERIFY_SENT", "error": detail}
+        
+        elapsed = time.time() - start
+        return {
+            "success": True,
+            "contact": "文件传输助手",
+            "message": message,
+            "output": "Sent to 文件传输助手",
+            "elapsed": round(elapsed, 1),
+        }
 
 
 def send_wechat_message(contact: str, message: str) -> dict:
