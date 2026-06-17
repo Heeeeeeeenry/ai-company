@@ -202,14 +202,21 @@ def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def _extract_wechat_conversation_request(task: str) -> Optional[tuple[str, Optional[int]]]:
-    """Extract (contact, max_turns) from natural-language conversation/reply requests.
+def _extract_wechat_conversation_request(task: str) -> Optional[tuple[str, Optional[int], bool]]:
+    """Extract (contact, max_turns, initiate) from natural-language conversation/reply requests.
     
-    Matches: "帮我跟XX聊天" / "替我回复XX" / "和XX聊几句" / "代聊XX 3轮"
+    Matches:
+      Passive: "帮我跟XX聊天" / "代聊XX 3轮" / "替我回复XX"
+      Active: "和XX闲聊几句" / "跟XX聊聊天" / "用微信和XX聊聊"
+    
+    initiate=True: AI should send an opening message first, then listen.
     """
     task = (task or "").strip()
-    if not task or not re.search(r"聊天|回复|代聊|帮我.*聊|替.*回复|聊几句|自动回复", task, re.IGNORECASE):
+    if not task or not re.search(r"聊天|回复|代聊|帮我.*聊|替.*回复|聊几句|自动回复|闲聊|聊聊天|聊聊|唠唠", task, re.IGNORECASE):
         return None
+    
+    # Detect active initiation keywords
+    initiate = bool(re.search(r"闲聊|聊聊天|聊聊|主动|随便聊|唠唠", task))
     
     # Extract max_turns
     max_turns = None
@@ -217,21 +224,21 @@ def _extract_wechat_conversation_request(task: str) -> Optional[tuple[str, Optio
     if turns_match:
         max_turns = int(turns_match.group(1))
     
-    # Extract contact name
+    # Extract contact name (闲随便唠 excluded to prevent capture leakage)
     contact_patterns = [
         # "帮我跟XX聊天" / "替我回复XX" / "帮我回复XX"
-        r"(?:帮|替)\s*(?:我\s*)?(?:跟|和|回复)\s*([^\s，。:：\d聊代]+)",
-        # "跟XX聊天" / "和XX聊几句" / "和XX自动回复"
-        r"(?:跟|和)\s*([^\s，。:：\d聊代]+?)\s*(?:聊天|聊几句|聊|自动回复|$)",
+        r"(?:帮|替)\s*(?:我\s*)?(?:跟|和|回复)\s*([^\s，。:：\d聊代闲随便唠]+)",
+        # "跟XX聊天" / "和XX聊几句" / "用微信和XX闲聊/随便聊聊/唠唠"
+        r"(?:跟|和|用微信和|用微信跟)\s*([^\s，。:：\d聊代闲随便唠]+?)\s*(?:聊天|聊几句|闲聊|聊聊|聊聊天|随便聊聊|唠唠|自动回复|$)",
         # "回复XX" / "代聊XX 3轮"
-        r"(?:回复|代聊)\s*([^\s，。:：\d聊代]+)",
+        r"(?:回复|代聊)\s*([^\s，。:：\d聊代闲随便唠]+)",
     ]
     for pattern in contact_patterns:
         match = re.search(pattern, task, re.IGNORECASE)
         if match:
             contact = _strip_wrapping_quotes(match.group(1))
             if contact:
-                return contact.strip(), max_turns
+                return contact.strip(), max_turns, initiate
     
     return None
 
@@ -416,11 +423,27 @@ async def triage_node(state: CEOState) -> dict:
     # ─── Conversation Fast-Path (AI-powered chat) ───
     conv_request = _extract_wechat_conversation_request(task)
     if conv_request:
-        contact, max_turns = conv_request
+        contact, max_turns, initiate = conv_request
         max_turns = max_turns or 3  # default 3 turns
         try:
             from src.wechat.conversation import ConversationManager
             mgr = ConversationManager(contact)
+            
+            if initiate:
+                # Active mode: send an opening message first, then listen
+                logger = __import__('logging').getLogger("ai_company")
+                logger.info("Active conversation: sending opening message to %s", contact)
+                opener = mgr._generate_opener()
+                if opener:
+                    logger.info("Opening: %s", opener[:60])
+                    opener_result = mgr.send(opener)
+                    if opener_result.get("success"):
+                        mgr.history.append({
+                            "sender": "me",
+                            "content": opener,
+                            "time": __import__('datetime').datetime.now().isoformat(),
+                        })
+            
             replies = mgr.run(turns=max_turns, poll_interval=3.0)
             
             # Build detailed summary

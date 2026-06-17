@@ -258,6 +258,46 @@ class ConversationManager:
         return result
     
     # ═══════════════════════════════════════════
+    # Active conversation: generate opening message
+    # ═══════════════════════════════════════════
+    
+    def _generate_opener(self) -> Optional[str]:
+        """Generate a natural opening message to start a conversation.
+        
+        Uses persona + relationship context. Should sound like a real person
+        casually starting a chat — not a bot greeting.
+        """
+        prompt = f"""你是一个正在用微信主动找人聊天的人。
+        
+{self.persona.build_system_prompt()}
+
+{self.relationship.build_prompt_fragment()}
+
+现在你想主动和{self.contact}聊聊天。请用一句话开场，要自然随意：
+- 可以问对方在干嘛
+- 可以分享一件小事
+- 可以打个招呼
+- 不要太正式，像真人聊天
+- 一句话就够了
+
+直接输出开场白，不要加引号："""
+        
+        try:
+            client = self._get_llm()
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=80,
+                temperature=0.95,
+            )
+            opener = resp.choices[0].message.content.strip()
+            opener = opener.strip('"').strip("'").strip("「").strip("」")
+            return opener if opener else None
+        except Exception as e:
+            logger.error("Failed to generate opener: %s", e)
+            return None
+    
+    # ═══════════════════════════════════════════
     # Step 5: One full turn
     # ═══════════════════════════════════════════
     
