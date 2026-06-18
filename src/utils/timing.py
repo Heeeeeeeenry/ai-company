@@ -29,7 +29,7 @@ class Timer:
     """Global timing tracker. Singleton pattern."""
     
     def __init__(self):
-        self.enabled = False
+        self.enabled = True  # enabled by default
         self._records: list = []  # [{phase, name, elapsed_ms, category}]
         self._started: dict = {}  # {name: start_time}
         self._task_start: Optional[float] = None
