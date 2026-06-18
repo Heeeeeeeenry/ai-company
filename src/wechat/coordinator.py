@@ -152,18 +152,17 @@ class WechatCoordinator:
         return False, "WeChat not visible after retries"
     
     def _ensure_search_open(self) -> tuple:
-        """STATE 2: Open search box, clear old text, verify with vision."""
+        """STATE 2: Open search box, verify with vision."""
         for attempt in range(self.MAX_RETRIES_PER_STATE):
-            self.action.open_search()
-            time.sleep(1)
-            # Clear any residual text from previous search (Agent A finding #4)
-            self.action.clear_search_text()
+            # First close any existing search, then open fresh
+            self.action.press_esc()
             time.sleep(0.3)
-            # Verify search box is open via vision
+            self.action.open_search()
+            time.sleep(1.0)
             result = self.vision.check_search_box()
             if result and result.get("search_open"):
                 return True, f"search box visible (attempt {attempt+1})"
-            time.sleep(1)
+            time.sleep(0.5)
         return False, "Search box not opening after retries"
     
     def _find_and_select_contact(self, contact: str) -> tuple:
@@ -173,17 +172,14 @@ class WechatCoordinator:
         click instead.  For normal contacts: press Enter after vision confirms.
         """
         is_file_transfer = (contact == "文件传输助手")
-        # 文件传输助手搜索技巧: 搜完整名会被消息历史淹没,搜短词\"文件\"即可命中
-        search_text = "文件" if is_file_transfer else contact
-        verify_contact = contact  # still verify against full name
 
         for attempt in range(self.MAX_RETRIES_PER_STATE):
-            # Type search text (pbcopy + Cmd+V — supports Chinese)
-            self.action.type_text(search_text)
+            # Type contact name
+            self.action.type_text(contact)
             time.sleep(1.5)
 
-            # Verify contact appears in search results via Qwen-VL (exact match only)
-            vision_result = self.vision.find_contact(verify_contact)
+            # Verify
+            vision_result = self.vision.find_contact(contact)
             if not vision_result or not vision_result.get("found") or not vision_result.get("is_exact_match"):
                 logger.warning("Vision: contact '%s' not exactly found (attempt %d): %s", 
                              contact, attempt+1, vision_result.get("contact_name","?") if vision_result else "None")
@@ -194,40 +190,25 @@ class WechatCoordinator:
             logger.info("Vision: contact '%s' found in search results", contact)
 
             if is_file_transfer:
-                # SPECIAL: 文件传输助手 — Enter triggers 搜一搜, single-click selects only.
-                # Must: Down Arrow to confirm selection → double-click to open.
-                self.action._run(
-                    'tell application "System Events"\n'
-                    '    tell process "WeChat"\n'
-                    '        key code 125\n'  # Down Arrow
-                    '        delay 0.5\n'
-                    '    end tell\n'
-                    'end tell'
-                )
-                time.sleep(1)
-                
-                # Get coords of the highlighted entry via Qwen-VL
-                img2, geo = self.vision._capture(return_geometry=True)
-                if img2:
-                    pos_result = self.vision._ask(img2, 
-                        '''"文件传输助手" is highlighted/selected in search results. 
-What are its EXACT pixel coordinates (center_x, center_y)?
-Return ONLY JSON:
-{"center_x": pixel, "center_y": pixel}''')
-                    if pos_result and pos_result.get("center_x"):
-                        sx, sy = self.vision.image_to_screen_coords(
-                            pos_result["center_x"], pos_result["center_y"], geo
-                        )
-                        # Convert retina pixels to points
-                        px, py = int(sx / 2), int(sy / 2)
-                        logger.info("Double-click 文件传输助手 at points (%d, %d)", px, py)
-                        self.action.click(px, py)
-                        time.sleep(0.1)
-                        self.action.click(px, py)
-                        time.sleep(2)
-                        return True, f"double-click at ({px}, {py})"
-                
-                logger.warning("Could not get coordinates for 文件传输助手, falling back to Enter")
+                # 文件传输助手: Enter triggers 搜一搜 → must click.
+                # Ask Kimi for Y position of first search result (reliable, not fixed)
+                img, geo = self.vision._capture(return_geometry=True)
+                if img:
+                    pos = self.vision._ask(img,
+                        'Find the FIRST entry in search results. Return ONLY JSON: {"y": pixel_y}')
+                    if pos and pos.get("y"):
+                        sy = self.vision.image_to_screen_coords(0, pos["y"], geo)[1]
+                        click_y = int(sy / 2)  # retina → points
+                        rect = self.action.get_window_rect()
+                        if rect:
+                            click_x = rect[0] + int(rect[2] * 0.3)
+                            logger.info("Double-click at (%d, %d) for 文件传输助手", click_x, click_y)
+                            self.action.click(click_x, click_y)
+                            time.sleep(0.1)
+                            self.action.click(click_x, click_y)
+                            time.sleep(2)
+                            return True, f"double-click at ({click_x}, {click_y})"
+                logger.warning("Could not determine click position, falling back to Enter")
                 self.action.press_enter()
                 time.sleep(2)
                 return True, "entered (fallback)"

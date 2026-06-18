@@ -21,10 +21,10 @@ Return ONLY JSON:
 
 PROMPT_FIND_CONTACT = """Analyze this WeChat search result screenshot.
 We are looking for EXACT contact: __CONTACT__
-IMPORTANT: Only return found=true if the EXACT name "__CONTACT__" appears in the search results.
-Do NOT match partial names or names that merely contain similar characters.
-Return ONLY JSON:
-{"found": true/false, "contact_name": "exact name found", "is_exact_match": true/false, "is_individual_contact": true/false, "position": "first|second|not_found", "center_x": pixel_x, "center_y": pixel_y, "confidence": 0.0-1.0}"""
+Return ONLY this exact JSON format with no other text:
+{"found": true, "is_exact_match": true}
+or
+{"found": false, "is_exact_match": false}"""
 
 PROMPT_CHAT_OPEN = """Analyze this WeChat screenshot. Expected chat with: __CONTACT__
 Return ONLY JSON:
