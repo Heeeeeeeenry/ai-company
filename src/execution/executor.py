@@ -11,6 +11,7 @@ Architecture:
 
 import asyncio
 import atexit
+import re
 import shlex
 import json
 import os
@@ -750,11 +751,11 @@ class ExecutionRouter:
                     messages.append(AIMessage(content=raw))
                     messages.append(HumanMessage(
                         content=(
-                            "YOUR RESPONSE FORMAT IS INVALID. You MUST use strict JSON:\n"
-                            '  To call a tool: {"action":"tool","tool":"tool_name","params":{...}}\n'
-                            '  For final answer: {"action":"final","output":"your answer"}\n'
-                            "Do NOT reply with plain text, markdown, or any other format.\n"
-                            "If you need data, call a tool. Do NOT answer from training data."
+                            "YOUR RESPONSE FORMAT IS INVALID. Do NOT acknowledge this — "
+                            "just output the correct JSON format NOW.\\n"
+                            '  To call a tool: {"action":"tool","tool":"tool_name","params":{...}}\\n'
+                            '  For final answer: {"action":"final","output":"your answer"}\\n'
+                            "No plain text, no compliance ack, no conversation — ONLY valid JSON."
                         )
                     ))
                     if len(messages) > 10:
@@ -775,6 +776,16 @@ class ExecutionRouter:
                             "tool_calls": tool_calls_made,
                         }
                     if not raw.strip().startswith('{'):
+                        # ── Compliance boilerplate filter ──
+                        _cl = raw.strip()
+                        if any(re.search(p, _cl) for p in [
+                            r"收到.*我会严格", r"我会.*遵守.*格式", r"有什么需要我做的",
+                            r"好的.*我会.*JSON", r"明白了.*我会",
+                            r"了解.*马上.*格式", r"按照.*格式.*回复", r"遵守.*JSON.*格式",
+                            r"^收到[，,。!\s]*$",
+                        ]):
+                            # Compliance ack — don't deliver as answer
+                            raw = "任务处理异常：模型输出格式错误，请重试或使用 /fix。"
                         return {
                             "success": True,
                             "output": raw[:3000],
@@ -916,6 +927,30 @@ Keep responses concise."""
         # On first two passes, a non-JSON answer means the LLM skipped tools —
         # push back so it gets another chance to use the correct format.
         if iteration >= 3 and len(raw) > 20:
+            # ── Compliance boilerplate detection ──
+            # deepseek-v4-pro sometimes responds to format correction with
+            # compliance ack ("收到，我会严格遵守...") instead of the actual answer.
+            # These must be rejected so the LLM gets another chance.
+            _cl = raw.strip()
+            _compliance_patterns = [
+                r"收到.*我会严格",
+                r"我会.*遵守.*格式",
+                r"有什么需要我做的",
+                r"好的.*我会.*JSON", r"明白了.*我会",
+                r"了解.*马上.*格式",
+                r"按照.*格式.*回复", r"遵守.*JSON.*格式",
+                r"^收到[，,。!\s]*$",
+            ]
+            _is_compliance = any(re.search(p, _cl) for p in _compliance_patterns)
+            # Also reject short pure-compliance responses (< 100 chars, no substantive content)
+            if not _is_compliance and len(_cl) < 100:
+                _subst_keywords = ["功能", "能力", "运行", "支持", "可以", "能够",
+                                   "使用", "search", "tool", "result", "data",
+                                   "价格", "天气", "代码", "文件", "输出"]
+                if not any(kw in _cl for kw in _subst_keywords):
+                    _is_compliance = True
+            if _is_compliance:
+                return {"action": "unknown", "raw": raw[:500]}
             return {"action": "final", "output": raw}
 
         return {"action": "unknown", "raw": raw[:500]}

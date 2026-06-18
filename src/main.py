@@ -184,7 +184,7 @@ async def run_cli():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
-    def _read_input(prompt: str = "▸ ") -> str:
+    async def _read_input(prompt: str = "▸ ") -> str:
         """Read with Tab-completion for /commands."""
         try:
             from prompt_toolkit import PromptSession
@@ -211,7 +211,9 @@ async def run_cli():
                     reserve_space_for_menu=8,
                     complete_style=None,  # default COLUMN multi-column dropdown
                 )
-            first = _read_input._s.prompt(prompt)
+            # Run in thread to avoid "asyncio.run() cannot be called from a running event loop"
+            loop = asyncio.get_running_loop()
+            first = await loop.run_in_executor(None, _read_input._s.prompt, prompt)
         except Exception as e:
             import logging; logging.getLogger("ai_company").warning(
                 f"Tab补全不可用(prompt_toolkit异常): {e}. 已降级为普通输入。")
@@ -273,7 +275,7 @@ async def run_cli():
             console.print("  👋 Bye!")
             break
         try:
-            user_input = _read_input()
+            user_input = await _read_input()
         except (EOFError, KeyboardInterrupt):
             console.print("\n  👋 Bye!")
             break

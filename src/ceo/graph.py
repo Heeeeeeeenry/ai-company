@@ -11,6 +11,10 @@ import re
 import os
 import urllib.request
 
+# ═══ P0 Module Integration ═══
+from src.intent import classify_task  # V5 intent router (replaces local classify_task)
+from src.verification import verify_aggregate as _v5_verify_aggregate
+
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -111,6 +115,17 @@ def _clean_output(raw: str) -> str:
     # If raw looks like JSON, strip it entirely
     if raw.strip().startswith('{') and raw.strip().endswith('}'):
         return "Output format error. Please ask again or use /fix."
+    # ── Compliance boilerplate detection ──
+    # deepseek-v4-pro sometimes outputs compliance ack instead of answer
+    _cl = raw.strip()
+    _compliance_patterns = [
+        r"收到.*我会严格", r"我会.*遵守.*格式", r"有什么需要我做的",
+        r"好的.*我会.*JSON", r"明白了.*我会",
+        r"了解.*马上.*格式", r"按照.*格式.*回复", r"遵守.*JSON.*格式",
+        r"^收到[，,。!\s]*$",
+    ]
+    if any(re.search(p, _cl) for p in _compliance_patterns):
+        return raw  # Don't mask — let upstream handle
     return raw
 
 
@@ -914,12 +929,22 @@ async def triage_node(state: CEOState) -> dict:
         f"Match: {match_method}"
     )
     
+    # ═══ V5 IntentRouter: detailed intent classification (for logging/routing) ═══
+    user_req = state.get("user_request", "")
+    try:
+        from src.intent import IntentRouter
+        intent_router = IntentRouter()
+        v5_result = intent_router.classify(user_req)
+        intent_detail = f"intent={v5_result.intent} conf={v5_result.confidence:.2f} via={v5_result.matched_by}"
+    except Exception:
+        intent_detail = "V5 intent unavailable"
+    
     return {
         "phase": next_phase,
         "department": department,
         "workspace_id": workspace_id,
         "task_type": classify_task(state.get("user_request", ""), department),
-        "execution_log": [f"[TRIAGE] {match_method} -> {department}"],
+        "execution_log": [f"[TRIAGE] {match_method} -> {department} | {intent_detail}"],
     }
 
 
@@ -990,107 +1015,6 @@ _TASK_TYPE_PROFILES = {
         ),
     },
 }
-
-
-def classify_task(task: str, department: str = "") -> str:
-    """Classify the task TYPE before routing — this is the critical first step.
-
-    Types:
-        COMMAND_EXECUTION — shell commands (pwd, ls, cat, curl, etc.)
-        SIMPLE_QUERY      — fact lookup with no code needed
-        RESEARCH          — investigation requiring web search
-        CODING            — write/modify code
-        CODE_REVIEW       — audit existing code
-        DOCUMENT          — generate documents/PDFs
-        CREATIVE          — marketing/content
-        GENERAL           — fallback
-    """
-    import re
-    task_lower = task.lower().strip()
-
-    # ── Rule 1: Shell command detection (HIGHEST priority) ──
-    # Matches standalone shell commands that should NOT go through code pipeline
-    shell_commands = [
-        r'^(pwd|ls|cd|cat|echo|mkdir|rm|cp|mv|chmod|grep|find|head|tail|wc|sort|uniq|diff)\b',
-        r'^(tar|gzip|gunzip|zip|unzip|curl|wget|ssh|scp|ping|nslookup|whoami|hostname|date|uptime)\b',
-        r'^(ps|top|kill|df|du|free|env|export|source|which|where|who)\b',
-        r'^(python3?\s+-[cm]|node\s+-e|ruby\s+-e|perl\s+-e|bash\s+-c|sh\s+-c)\b',
-    ]
-    for pattern in shell_commands:
-        if re.search(pattern, task_lower):
-            return "COMMAND_EXECUTION"
-
-    # ── Rule 1b: Local system detection (before lookup to avoid "查看" → researcher) ──
-    local_sys_patterns = [
-        r'检测.*(?:本地|运行|软件|进程|系统)',
-        r'本地.*(?:软件|进程|运行|程序|检测)',
-        r'打开.*(?:微信|QQ|钉钉|应用|软件)',
-        r'查看.*(?:置顶|联系人|聊天)',
-        r'pgrep|osascript|applescript',
-    ]
-    for p in local_sys_patterns:
-        if re.search(p, task_lower):
-            return "LOCAL_SYSTEM"
-
-    # ── Rule 2: Execute/run a command explicitly ──
-    if re.search(r'(执行|运行|run|execute)\s+(pwd|ls|命令|command|shell)', task_lower):
-        return "COMMAND_EXECUTION"
-
-    # ── Rule 3: Simple fact lookup (no code needed) ──
-    lookup_patterns = [
-        r'(?:帮我|请|可以|帮忙|能|能不能|给我)?(?:查|搜|搜索|找|什么是|怎么|为什么|谁|什么时候|哪里|多少|几)',
-        r'^(how|what|when|where|who|why|which)\b',
-    ]
-    for p in lookup_patterns:
-        if re.search(p, task_lower, re.IGNORECASE):
-            return "SIMPLE_QUERY"
-
-    # ── Rule 4: Code review ──
-    review_kw = [r'代码审计', r'代码审查', r'审查代码', r'代码质量',
-                 r'code review', r'代码打分', r'审计代码', r'审查.*打分']
-    for kw in review_kw:
-        if re.search(kw, task_lower):
-            return "CODE_REVIEW"
-
-    # ── Rule 5: Document generation ──
-    doc_kw = [r'生成.*(?:pdf|文档|报告|文件)', r'写.*(?:文档|报告|总结)',
-              r'导出', r'周报', r'月报', r'日报', r'会议纪要']
-    for kw in doc_kw:
-        if re.search(kw, task_lower):
-            return "DOCUMENT"
-
-    # ── Rule 6: Coding (write/implement/develop) ──
-    code_kw = [r'写(?:代码|程序|脚本)', r'开发', r'实现', r'bug', r'修复',
-               r'重构', r'refactor', r'写.*api', r'写.*函数']
-    for kw in code_kw:
-        if re.search(kw, task_lower):
-            return "CODING"
-
-    # ── Rule 7: Research (web-dependent) ──
-    research_kw = [r'研究', r'分析', r'调研', r'对比', r'竞品',
-                   r'research', r'compare', r'survey', r'trend']
-    for kw in research_kw:
-        if re.search(kw, task_lower):
-            return "RESEARCH"
-
-    # ── Rule 8: Creative/marketing ──
-    creative_kw = [r'文案', r'推广', r'seo', r'广告', r'社交媒体',
-                   r'营销', r'公众号', r'marketing', r'copywriting']
-    for kw in creative_kw:
-        if re.search(kw, task_lower):
-            return "CREATIVE"
-
-    # ── Rule 9: Department-based fallback ──
-    if department == "researcher":
-        return "RESEARCH"
-    if department == "marketer":
-        return "CREATIVE"
-    if department == "qa":
-        return "CODING"
-    if department == "devops":
-        return "CODING"
-
-    return "GENERAL"
 
 
 # Keep old name for backwards compat
@@ -1539,6 +1463,20 @@ async def pmo_node(state: CEOState) -> dict:
     }
 
 
+# ─── Legacy task_type → V5 intent mapping (for verifier compatibility) ───
+
+_LEGACY_TO_V5_INTENT = {
+    "COMMAND_EXECUTION": "COMMAND",
+    "SIMPLE_QUERY": "SEARCH",
+    "DEVELOPMENT": "CODING",
+    "CODE_REVIEW": "CODE_REVIEW",
+    "CREATIVE": "CREATIVE",
+    "LOCAL_SYSTEM": "SYSTEM",
+    "DOCUMENT": "FILE",
+    "GENERAL": "GENERAL_CHAT",
+}
+
+
 @_safe_node("VerifyAggregate")
 async def verify_aggregate_node(state: CEOState) -> dict:
     """Node function."""
@@ -1610,10 +1548,18 @@ async def verify_aggregate_node(state: CEOState) -> dict:
         stale_patterns = [
             r"无法获取.*?(?:实时|数据|信息)",
             r"根据已知数据",
-            r"cannot\s+(?:access|fetch|retrieve).*?(?:data|price|information)",
+r"cannot\s+(?:access|fetch|retrieve).*?(?:data|price|information)",
             r"我无法提供.*?(?:建议|预测|数据)",
             r"无法访问.*?(?:数据|页面|网站)",
-            r"no\s+(?:real.?time|current|live)\s+data",
+r"no\s+(?:real.?time|current|live)\s+data",
+            # Compliance boilerplate: LLM ack'd format instruction instead of answering
+            r"收到.*我会严格",
+            r"我会.*遵守.*格式",
+            r"有什么需要我做的",
+            r"好的.*我会.*JSON",
+            r"明白了.*我会",
+            r"了解.*马上.*格式",
+r"^收到[，,。!\s]*$",
         ]
         is_stale = False
         import re as _vestale
@@ -1697,6 +1643,46 @@ async def verify_aggregate_node(state: CEOState) -> dict:
                                   "pmo_verdict": "SKIPPED"},
                     "execution_log": ["[CEO-AGGREGATE] Short query -> skip audit, direct deliver"],
                 }
+    
+
+    # ═══ V5 Verifier Integration: use new verifier for non-fast-lane tasks ═══
+    v5_intent = _LEGACY_TO_V5_INTENT.get(task_type, task_type.upper())
+    final_output_v5 = str(state.get("final_output", ""))
+    exec_log_v5 = state.get("execution_log", [])
+    try:
+        v5_score_card = _v5_verify_aggregate(v5_intent, final_output_v5, exec_log_v5)
+        if not v5_score_card.get("needs_audit", True) and not score_card.get("overall_score"):
+            return {
+                "phase": "deliver",
+                "workspace_id": workspace_id,
+                "score_card": {
+                    "score": v5_score_card.get("score", 80),
+                    "decision": v5_score_card.get("decision", "APPROVE"),
+                    "final_score": v5_score_card.get("score", 80),
+                    "next_action": "deliver",
+                    "auditor_verdict": "SKIPPED",
+                    "pmo_verdict": "SKIPPED",
+                    "v5_verifier": v5_score_card,
+                },
+                "execution_log": [f"[CEO-AGGREGATE] V5 verifier: {v5_intent} -> {v5_score_card.get('decision')} (audit skipped)"],
+            }
+        if v5_intent == "CODING" and v5_score_card.get("score", 0) < 60:
+            return {
+                "phase": "deliver",
+                "workspace_id": workspace_id,
+                "score_card": {
+                    "score": v5_score_card.get("score", 0),
+                    "decision": "FAIL",
+                    "final_score": v5_score_card.get("score", 0),
+                    "next_action": "deliver",
+                    "auditor_verdict": "SKIPPED",
+                    "pmo_verdict": "SKIPPED",
+                    "v5_verifier": v5_score_card,
+                },
+                "execution_log": [f"[CEO-AGGREGATE] V5 verifier: CODING task scored {v5_score_card.get('score')} — fast-fail"],
+            }
+    except Exception:
+        pass  # Verifier unavailable — fall through to existing auditor logic
     
     auditor_score = score_card.get("overall_score", 60)
     auditor_verdict = score_card.get("verdict", "APPROVE")
