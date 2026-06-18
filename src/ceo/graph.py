@@ -345,6 +345,13 @@ def _get_llm(role: str = "ceo") -> BaseChatModel:
     tracker.set_context(role=role)
     callbacks = [tracker]
     
+    # Timing callback (records LLM call duration)
+    try:
+        from src.utils.timing import TimingCallback
+        callbacks.append(TimingCallback(role=role, model=mc.model))
+    except ImportError:
+        pass
+    
     if mc.provider == "deepseek":
         # Reasoner needs more time (can take 30-90s), chat is faster
         is_reasoner = "reasoner" in mc.model.lower()
@@ -385,13 +392,17 @@ CEO_SYSTEM_PROMPT = """你是AI公司CEO. 不亲自执行, 只做: 路由意图-
 # ─── Node Functions ───────────────────────────────
 
 def _safe_node(name: str):
-    """Decorator: wraps a graph node with crash protection.
+    """Decorator: wraps a graph node with crash protection and timing.
     
     If the node raises an unexpected exception, the workflow falls
     through to deliver with a clear error message instead of crashing.
+    
+    Also records execution time when timer.enabled.
     """
     def decorator(fn):
         async def wrapper(state, *args, **kwargs):
+            from src.utils.timing import timer
+            timer.start(name, "node")
             try:
                 return await fn(state, *args, **kwargs)
             except Exception as e:
@@ -403,6 +414,8 @@ def _safe_node(name: str):
                     "execution_log": [f"[{name}] CRASHED: {type(e).__name__}: {str(e)[:200]}"],
                     "score_card": {"score": 0, "decision": "FAIL", "next_action": "deliver"},
                 }
+            finally:
+                timer.stop(name)
         wrapper.__name__ = fn.__name__
         return wrapper
     return decorator
@@ -411,6 +424,9 @@ def _safe_node(name: str):
 @_safe_node("Triage")
 async def triage_node(state: CEOState) -> dict:
     """Node function."""
+    from src.utils.timing import timer
+    timer.start_task()  # start the overall task timer
+    
     from src.departments.roles import role_registry
 
     llm = _get_llm("ceo")
@@ -1905,6 +1921,15 @@ async def deliver_node(state: CEOState) -> dict:
         except Exception:
             import logging
             logging.getLogger("ai_company.learning").debug("Skill capture failed", exc_info=True)
+    
+    # ── Timing report ──
+    try:
+        from src.utils.timing import timer
+        timing_report = timer.get_summary()
+        if timing_report:
+            dept_output = str(dept_output) + timing_report
+    except Exception:
+        pass
     
     return {
         "phase": "complete",

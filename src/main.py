@@ -330,6 +330,9 @@ async def run_cli():
         if user_input.lower().startswith("/remember "):
             _cmd_remember(console, user_input)
             continue
+        if user_input.lower().startswith("/timer"):
+            _cmd_timer(console, user_input)
+            continue
         if user_input.lower() == "/status":
             _show_status(console, plat, roles, store)
             continue
@@ -451,6 +454,7 @@ def _show_help(console):
     table.add_row("/mood [state]", "Set today's mood (normal|busy|tired|happy|lazy)")
     table.add_row("/whois <contact>", "Show relationship profile")
     table.add_row("/remember <c> <f>", "Store fact about contact")
+    table.add_row("/timer on|off", "Toggle task timing stats")
     table.add_row("/fix, /heal", "Auto-detect and fix code errors")
     table.add_row("/quit, /q", "Exit")
     console.print(table)
@@ -765,6 +769,24 @@ def _cmd_remember(console, user_input: str):
     from src.wechat.relationship import add_fact
     add_fact(contact, fact)
     console.print(f"[green]✓ 已记住关于 {contact} 的事实:[/green] {fact}")
+
+
+def _cmd_timer(console, user_input: str):
+    """Handle /timer on|off|status command."""
+    from src.utils.timing import timer
+    parts = user_input.strip().split(maxsplit=1)
+    sub = parts[1].lower().strip() if len(parts) >= 2 else "status"
+    
+    if sub in ("on", "1", "true", "enable"):
+        timer.enabled = True
+        console.print("[green]⏱ 耗时统计: 已开启[/green]")
+    elif sub in ("off", "0", "false", "disable"):
+        timer.enabled = False
+        console.print("[dim]⏱ 耗时统计: 已关闭[/dim]")
+    else:
+        status = "[green]开启[/green]" if timer.enabled else "[dim]关闭[/dim]"
+        console.print(f"⏱ 耗时统计: {status}")
+        console.print("[dim]用法: /timer on | off[/dim]")
 
 
 def _cmd_vision(console, user_input, current_session):
