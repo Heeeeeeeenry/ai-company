@@ -975,13 +975,7 @@ Keep responses concise."""
             import os as _os
             exec_mode = _os.environ.get("PYTHON_EXEC_MODE", "sandbox")
             if exec_mode == "sandbox" and config.sandbox_provider == "local":
-                # Local sandbox → warn but allow with timeout limit
-                import logging
-                logging.getLogger("ai_company.execution").warning(
-                    "DANGEROUS tool '%s' running locally without sandbox. "
-                    "Set PYTHON_EXEC_MODE=sandbox and configure Docker/E2B for isolation.",
-                    tool_name,
-                )
+                # Suppressed — noisy warning on every tool call
                 # Add execution limits to params
                 if "code" in params:
                     code = params["code"]

@@ -9,6 +9,8 @@ import sys
 import warnings
 
 # ── Silence noisy libraries BEFORE any other imports ──
+import os as _os
+_os.environ["JIEBA_LOG_LEVEL"] = "60"  # suppress "Building prefix dict" etc
 import logging
 for _noisy in ("jieba", "jieba.cache", "jieba.cutter", "jieba.cpex"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
@@ -25,6 +27,15 @@ import time
 
 # Ensure project root is in Python path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+# ── Post-import jieba silencing (jieba resets its logger to DEBUG at import) ──
+def _silence_jieba():
+    try:
+        import jieba
+        jieba.default_logger.setLevel(logging.CRITICAL)
+    except Exception:
+        pass
+_silence_jieba()
 
 from src.config import config
 from src.telegram_bot import start_bot
@@ -215,8 +226,9 @@ async def run_cli():
             loop = asyncio.get_running_loop()
             first = await loop.run_in_executor(None, _read_input._s.prompt, prompt)
         except Exception as e:
-            import logging; logging.getLogger("ai_company").warning(
-                f"Tab补全不可用(prompt_toolkit异常): {e}. 已降级为普通输入。")
+            if sys.stdin.isatty():  # only warn in real interactive mode
+                import logging; logging.getLogger("ai_company").warning(
+                    f"Tab补全不可用(prompt_toolkit异常): {e}. 已降级为普通输入。")
             first = input(prompt)
         if not first or not first.strip():
             return first.strip()
@@ -258,8 +270,7 @@ async def run_cli():
         status_parts.append(f"{exp_tasks} tasks (avg {avg_score}/100)")
     else:
         status_parts.append("fresh start")
-    if not plat.has_ruff:
-        status_parts.append("⚠ no ruff")
+    # ruff check skipped — not critical for end users
     if not _readline_ok and plat.system == "Darwin":
         status_parts.append("⚠ libedit CJK issue")
     status_line = " · ".join(status_parts)
@@ -373,7 +384,7 @@ async def run_cli():
         # Show cursor during thinking (Rich spinner hides it; ensure restore)
         console.show_cursor(True)
         t_start = time.time()
-        with console.status("[yellow]CEO thinking…[/yellow]", spinner="dots"):
+        with console.status("[dim]处理中…[/dim]", spinner="dots"):
             t0 = time.time()
             try:
                 result = await run_ceo(user_input)
