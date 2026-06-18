@@ -34,7 +34,6 @@ class WechatCoordinator:
         # Safety: truncate long messages
         message = message[:500]
         start = time.time()
-        self._blind_trust = False  # reset to track if state 5 used blind trust
         
         # ─── Normal flow (handles all contacts including 文件传输助手) ───
         # Note: 文件传输助手 opens via search + vision-click (not Enter),
@@ -95,24 +94,14 @@ class WechatCoordinator:
         # STATE 6: Send and verify
         ok, detail = self._send_and_verify(message)
         if not ok:
-            # FINAL SAFETY CHECK: message might have been sent but vision missed it.
+            # FINAL SAFETY CHECK: delayed re-check
             logger.warning("Send+verify failed, checking if message was already sent...")
             time.sleep(2)
             sent_result = self.vision.check_message_sent(message)
             if sent_result and sent_result.get("sent") and sent_result.get("is_expected_message"):
                 logger.info("VISION: message was already sent (belated verification)")
                 ok, detail = True, "verified (delayed)"
-            elif self._blind_trust:
-                # Both states blind: consistent vision failure, assume sent
-                logger.warning("Blind trust: state 5 + state 6 both unverified, "
-                             "but Enter was pressed — accepting as sent")
-                ok, detail = True, "blind trust (full)"
-            else:
-                # State 5 passed (message confirmed in input), state 6 can't verify.
-                # Message WAS in input, Enter WAS pressed → accept.
-                logger.warning("State 1-5 OK, state 6 verify failed — accepting "
-                             "(message was confirmed in input)")
-                ok, detail = True, "accepted (states 1-5 OK)"
+            # NO blind trust, NO fallback acceptance — honest failure only
         
         if not ok:
             return {"success": False, "state": "VERIFY_SENT", "error": detail}
@@ -261,37 +250,24 @@ Return ONLY JSON:
         return False, f"Chat not open with '{contact}' after retries"
 
     def _type_and_verify_message(self, message: str) -> tuple:
-        """STATE 5: Click input field, select all (replace garbage), paste message, verify.
-
-        If vision verification fails after all retries, returns True anyway
-        (blind trust mode). The real verification happens in STATE 6 (press Enter
-        and check if message appears in chat history).
+        """STATE 5: Click input field, select all, paste message, verify.
+        
+        Returns False if vision can't confirm the message is in the input box.
+        No blind trust — if we can't see it, it's not there.
         """
         for attempt in range(self.MAX_RETRIES_PER_STATE):
-            # Click the input field first to ensure focus
             self.action.click_input_field()
             time.sleep(0.3)
-
-            # Cmd+A to select all existing text (clears garbage from search operations)
-            self.action.clear_search_text()  # Reuses Cmd+A+Delete pattern
+            self.action.clear_search_text()
             time.sleep(0.1)
-
-            # Paste message via clipboard (pbcopy + Cmd/V — Chinese-safe)
             self.action.type_text(message)
             time.sleep(0.8)
-
-            # Verify message is in input box via vision
             result = self.vision.check_message_typed(message)
             if result and result.get("message_in_input"):
                 return True, f"message in input box (attempt {attempt+1})"
             logger.warning("Vision: message not confirmed in input box (attempt %d)", attempt+1)
             time.sleep(1)
-        
-        # BLIND TRUST: vision may have missed it, but clipboard+cursor were correct.
-        # STATE 6 (send+verify) will catch actual failures.
-        logger.warning("Vision: blind trust — assuming message is in input, verify in state 6")
-        self._blind_trust = True
-        return True, "blind trust (verify in state 6)"
+        return False, "Message not confirmed in input box"
     
     def _send_and_verify(self, message: str) -> tuple:
         """STATE 6: Press Enter ONCE, then retry vision verification only.
@@ -325,7 +301,6 @@ Return ONLY JSON:
         """
         message = message[:500]
         start = time.time()
-        self._blind_trust = False
         
         # Fast check: is WeChat still responsive?
         rect = self.action.get_window_rect()
@@ -347,19 +322,12 @@ Return ONLY JSON:
         # Send and verify
         ok, detail = self._send_and_verify(message)
         if not ok:
-            # Final safety check
+            # Delayed check only
             logger.warning("Quick send: verify failed, delayed check...")
             time.sleep(2)
             sent_result = self.vision.check_message_sent(message)
             if sent_result and sent_result.get("sent") and sent_result.get("is_expected_message"):
-                logger.info("VISION: message was already sent (belated)")
                 ok, detail = True, "verified (delayed)"
-            elif self._blind_trust:
-                logger.warning("Quick send: blind trust — accepting as sent")
-                ok, detail = True, "blind trust (full)"
-            else:
-                logger.warning("Quick send: state 5 OK, state 6 miss — accepting")
-                ok, detail = True, "accepted (state 5 OK)"
         
         if not ok:
             return {"success": False, "state": "VERIFY_SENT", "error": detail}
