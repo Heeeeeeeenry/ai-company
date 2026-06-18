@@ -115,9 +115,16 @@ class ExperienceStore:
         try:
             if os.path.exists(self.storage_path):
                 with open(self.storage_path, "r") as f:
-                    data = json.load(f)
+                    content = f.read()
+                    if not content.strip():  # Empty file — fresh start
+                        return
+                    data = json.loads(content)
                     self._records = [ExperienceRecord(**r) for r in data.get("records", [])]
                     self._task_counter = data.get("counter", 0)
+        except json.JSONDecodeError:
+            import logging
+            logging.getLogger("ai_company.evolution").warning(
+                "Experience store corrupted, starting fresh")
         except Exception:
             import logging
             logging.getLogger("ai_company.evolution").warning(
