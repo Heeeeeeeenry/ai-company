@@ -185,54 +185,38 @@ async def run_cli():
     signal.signal(signal.SIGTERM, _signal_handler)
 
     def _read_input(prompt: str = "▸ ") -> str:
-        """Read input with multi-line support and paste detection.
-        
-        Multi-line: end a line with \\ to continue on the next line (like bash).
-        Paste detection: when stdin is a TTY and multiple lines arrive at once
-        (e.g. copy-paste), they are joined into a single input.
-        Piped input is read line-by-line.
-        """
+        """Read with Tab-completion for /commands."""
         try:
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.completion import Completer, Completion
+            class _Cmd(Completer):
+                D = {"/help":"帮助","/status":"状态","/roles":"角色","/token":"用量",
+                     "/timer":"计时","/audit":"审查","/optimize":"优化","/improve":"报告",
+                     "/mood":"心情","/whois":"画像","/remember":"记忆","/session":"会话",
+                     "/vision":"视觉","/clear":"清屏","/quit":"退出","/fix":"修复"}
+                def get_completions(self, d, e):
+                    t = d.text_before_cursor
+                    for c,v in self.D.items():
+                        if c.startswith(t): yield Completion(c, start_position=-len(t), display_meta=v)
+            if not hasattr(_read_input, "_s"):
+                _read_input._s = PromptSession(completer=_Cmd(), complete_while_typing=False)
+            first = _read_input._s.prompt(prompt)
+        except Exception:
             first = input(prompt)
-        except (EOFError, KeyboardInterrupt):
-            raise
         if not first or not first.strip():
             return first.strip()
-        # Only use paste detection + continuation when interactive (TTY)
         if not sys.stdin.isatty():
             return first.strip()
-        
-        # ── Multi-line continuation: \\ at end of line → continue ──
         lines = []
         current = first
-        cont_prompt = "… "  # Continuation prompt
         while current.rstrip().endswith("\\"):
-            # Strip trailing \\ and whitespace, keep the line
-            stripped = current.rstrip()[:-1].rstrip()
-            if stripped:
-                lines.append(stripped)
-            current = input(cont_prompt)
-        if current.strip():
-            lines.append(current.rstrip())
-        
-        # If continuation triggered, return joined lines
-        if lines:
-            return "\n".join(lines)
-        
-        # ── Paste detection: check if more data is buffered ──
-        paste_lines = [first]
-        try:
-            while select.select([sys.stdin], [], [], 0)[0]:
-                try:
-                    line = input()
-                    paste_lines.append(line)
-                except (EOFError, KeyboardInterrupt):
-                    break
-        except (ValueError, OSError):
-            pass  # stdin not a tty, select not supported
-        if len(paste_lines) == 1:
-            return first.strip()
-        return "\n".join(line.rstrip() for line in paste_lines)
+            s = current.rstrip()[:-1].rstrip()
+            if s: lines.append(s)
+            try: current = input("… ")
+            except: break
+        if current.strip(): lines.append(current.rstrip())
+        if lines: return "\n".join(lines)
+        return first.strip()
 
     # ── Startup Banner (OpenClaw-style clean) ──
     plat = get_platform()
