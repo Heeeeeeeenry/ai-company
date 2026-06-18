@@ -2210,6 +2210,57 @@ def build_ceo_graph() -> StateGraph:
     return workflow
 
 
+# ═══ Session Memory Context Injection ═══
+
+def _inject_session_context(state: dict) -> None:
+    """Load session history + user/knowledge memory and inject into state.
+    
+    Injects:
+    1. Recent conversation turns (last 10) as context
+    2. User preferences from MemoryLayer
+    3. Session memories (key facts learned)
+    """
+    context_parts = []
+    
+    # ── Load session conversation history ──
+    try:
+        from src.session import get_session_manager
+        from src.session.memory import get_session_memory
+        mgr = get_session_manager()
+        if mgr.current:
+            mem = get_session_memory(mgr.current.id)
+            history = mem.get_recent_conversations(10)
+            if history:
+                turns = []
+                for t in history:
+                    q = t.get("user", "")[:200]
+                    a = t.get("assistant", "")[:200]
+                    if q or a:
+                        turns.append(f"Q: {q}\nA: {a}")
+                if turns:
+                    context_parts.append("## 最近的对话历史\n" + "\n---\n".join(turns))
+    except Exception:
+        pass
+    
+    # ── Load MemoryLayer (User + Knowledge) ──
+    try:
+        from src.memory.layer import memory_layer
+        mem_ctx = memory_layer.get_context_for_prompt()
+        if mem_ctx.strip():
+            context_parts.append(mem_ctx)
+    except Exception:
+        pass
+    
+    if context_parts:
+        full_context = "\n\n".join(context_parts)
+        # Inject as system message at the start
+        from langchain_core.messages import SystemMessage
+        state["messages"].insert(0, SystemMessage(
+            content=f"[系统记忆 — 跨会话持久化]\n{full_context}"
+        ))
+        state["execution_log"] = [f"[MEMORY] Loaded session context ({len(context_parts)} sections)"]
+
+
 async def run_ceo(user_message: str) -> CEOState:
     """Run the CEO workflow on a user message. Returns final state."""
     graph = build_ceo_graph()
@@ -2232,6 +2283,9 @@ async def run_ceo(user_message: str) -> CEOState:
         "prd": None,
         "arch_design": None,
     }
+    
+    # ═══ Inject session memory context ═══
+    _inject_session_context(initial_state)
     
     config_params = {
         "configurable": {

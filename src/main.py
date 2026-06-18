@@ -279,6 +279,16 @@ async def run_cli():
     console.print(title)
     console.print(f"  {status_line}", style="dim")
     console.print(f"  Session: [cyan]{session_name}[/cyan] | Type /help for commands, /quit to exit")
+    
+    # Show memory status on startup
+    try:
+        from src.session import get_session_memory
+        mem = get_session_memory(current_session.id)
+        convs = mem.get_recent_conversations(1)
+        if convs:
+            console.print(f"  [dim]🧠 记忆已恢复 ({current_session.message_count} 条对话)[/dim]")
+    except Exception:
+        pass
     console.print()
 
     while True:
