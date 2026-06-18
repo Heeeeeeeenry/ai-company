@@ -147,7 +147,23 @@ class WechatVision:
                 text = text.split("```")[1]
                 if text.startswith("json"):
                     text = text[4:]
-            return json.loads(text.strip())
+            
+            # Try direct JSON parse
+            try:
+                return json.loads(text.strip())
+            except json.JSONDecodeError:
+                pass
+            
+            # Try to extract JSON from text (model may add commentary)
+            import re
+            m = re.search(r'\{[^{}]*\}', text)
+            if m:
+                try:
+                    return json.loads(m.group())
+                except json.JSONDecodeError:
+                    pass
+            
+            return None
         except Exception:
             return None
     

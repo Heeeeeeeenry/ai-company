@@ -103,17 +103,11 @@ class WechatCoordinator:
                 logger.info("VISION: message was already sent (belated verification)")
                 ok, detail = True, "verified (delayed)"
             elif self._blind_trust:
-                # If state 5 needed blind trust, state 6 probably does too.
-                # Enter WAS pressed — accept as success rather than false fail.
+                # Only trust if state 5 was also blind (consistent vision failure)
                 logger.warning("Blind trust: state 5 + state 6 both unverified, "
                              "but Enter was pressed — accepting as sent")
                 ok, detail = True, "blind trust (full)"
-            else:
-                # State 1-5 all passed (message was typed correctly). 
-                # State 6 vision is just flaky — accept as sent.
-                logger.warning("State 1-5 OK but verify failed — accepting as sent "
-                             "(message was in input, Enter was pressed)")
-                ok, detail = True, "accepted (states 1-5 OK)"
+            # Otherwise: honest failure — don't lie about success
         
         if not ok:
             return {"success": False, "state": "VERIFY_SENT", "error": detail}
@@ -355,9 +349,7 @@ Return ONLY JSON:
             elif self._blind_trust:
                 logger.warning("Quick send: blind trust — accepting as sent")
                 ok, detail = True, "blind trust (full)"
-            else:
-                logger.warning("Quick send: verify failed but type succeeded — accepting")
-                ok, detail = True, "accepted (type OK)"
+            # Otherwise: honest failure
         
         if not ok:
             return {"success": False, "state": "VERIFY_SENT", "error": detail}
