@@ -433,8 +433,13 @@ async def triage_node(state: CEOState) -> dict:
     trivial_set = {
         "help", "?", "h", "hi", "hello", "hey", "你好", "您好",
         "thanks", "thx", "ok", "好的", "test", "测试",
+        # Common single words that aren't tasks
+        "fuck", "shit", "damn", "wtf", "lol", "haha", "哈哈",
+        "no", "yes", "yeah", "nope", "yep", "嗯", "哦", "啊",
+        "bye", "goodbye", "再见", "88", "886",
+        "what", "why", "when", "who", "how",
     }
-    if task.lower() in trivial_set:
+    if task.lower() in trivial_set or len(task) <= 2:  # 2-char inputs can't be real tasks
         return {
             "phase": "deliver",
             "department": "ceo",
@@ -1666,6 +1671,30 @@ async def verify_aggregate_node(state: CEOState) -> dict:
                 "execution_log": ["[CEO-AGGREGATE] Document/PDF task -> skip audit, direct deliver"],
             }
     
+    # ═══ General short/non-code fast-lane: skip if no auditor score ═══
+    # Covers queries that were routed to verify (audit skipped) but aren't
+    # COMMAND/SIMPLE/DOCUMENT/LOCAL_SYSTEM. Applies to short factual queries,
+    # simple lookups, and other non-code tasks.
+    if not score_card.get("overall_score"):
+        task = state.get("user_request", "").strip()
+        if len(task) < 30:  # short queries
+            code_kw = ["写", "开发", "实现", "修改", "修复", "bug", "代码", "code",
+                       "函数", "接口", "api", "部署", "deploy", "数据库", "测试"]
+            if not any(kw in task.lower() for kw in code_kw):
+                final_output = str(state.get("final_output", ""))
+                has_output = bool(final_output.strip())
+                return {
+                    "phase": "deliver",
+                    "workspace_id": workspace_id,
+                    "score_card": {"score": 90 if has_output else 0,
+                                  "decision": "APPROVE" if has_output else "FAIL",
+                                  "final_score": 90 if has_output else 0,
+                                  "next_action": "deliver",
+                                  "auditor_verdict": "SKIPPED",
+                                  "pmo_verdict": "SKIPPED"},
+                    "execution_log": ["[CEO-AGGREGATE] Short query -> skip audit, direct deliver"],
+                }
+    
     auditor_score = score_card.get("overall_score", 60)
     auditor_verdict = score_card.get("verdict", "APPROVE")
     pmo_score = pmo_result.get("compliance_score", 70)
@@ -2069,6 +2098,16 @@ def route_after_department(state: CEOState) -> str:
         if _vre2.search(r"pdf|生成.*文档|写报告|生成报告|写文档|周报|月报|日报|会议纪要|写总结", task):
             return "verify"
 
+    # ═══ Short simple tasks skip audit ═══
+    # If the user request is short and doesn't look like code/development,
+    # don't waste time on Auditor+PMO (saves 60-80s)
+    task = state.get("user_request", "").strip()
+    if len(task) < 20:
+        code_keywords = ["写", "开发", "实现", "修改", "修复", "bug", "代码", "code",
+                         "函数", "接口", "api", "部署", "deploy", "数据库"]
+        if not any(kw in task.lower() for kw in code_keywords):
+            return "verify"  # skip audit for short non-code queries
+    
     return "auditor"
 
 
