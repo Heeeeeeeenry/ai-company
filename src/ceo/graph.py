@@ -3,6 +3,9 @@
 from typing import TypedDict, Annotated, Optional
 from datetime import datetime
 import operator
+
+# ═══ Global switches ───
+AUDIT_ENABLED = True  # /audit on|off — when False, skip Auditor+PMO for all tasks
 import json
 import re
 import os
@@ -2099,8 +2102,10 @@ def route_after_department(state: CEOState) -> str:
             return "verify"
 
     # ═══ Short simple tasks skip audit ═══
-    # If the user request is short and doesn't look like code/development,
-    # don't waste time on Auditor+PMO (saves 60-80s)
+    # If AUDIT_ENABLED is False, skip auditor/pmo for ALL tasks
+    if not AUDIT_ENABLED:
+        return "verify"
+    
     task = state.get("user_request", "").strip()
     if len(task) < 20:
         code_keywords = ["写", "开发", "实现", "修改", "修复", "bug", "代码", "code",

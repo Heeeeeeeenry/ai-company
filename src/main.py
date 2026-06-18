@@ -343,6 +343,9 @@ async def run_cli():
         if user_input.lower().startswith("/optimize"):
             _cmd_optimize(console, user_input)
             continue
+        if user_input.lower().startswith("/audit"):
+            _cmd_audit(console, user_input)
+            continue
         if user_input.lower() == "/status":
             _show_status(console, plat, roles, store)
             continue
@@ -443,34 +446,26 @@ async def run_cli():
 def _show_help(console):
     """Display available commands."""
     from rich.table import Table
-    table = Table(title="Commands", show_header=False, padding=(0, 2))
+    from src.ceo.graph import AUDIT_ENABLED
+    table = Table(title="🐶 狗蛋儿命令", show_header=False, padding=(0, 2))
     table.add_column(style="cyan")
     table.add_column(style="dim")
-    table.add_row("/help, /?", "Show this help")
-    table.add_row("/status", "System status & stats")
-    table.add_row("/roles", "List all agents")
-    table.add_row("/token, /usage", "Session token usage")
-    table.add_row("/memory", "Memory health")
-    table.add_row("/sessions", "List all sessions")
-    table.add_row("/session new <name>", "Create new session")
-    table.add_row("/session switch <name>", "Switch session")
-    table.add_row("/session rename <name>", "Rename current session")
-    table.add_row("/session delete <name>", "Delete a session")
-    table.add_row("/global set <k> <v>", "Set global memory")
-    table.add_row("/global get <k>", "Get global memory")
-    table.add_row("/clear, /cls", "Clear screen")
-    table.add_row("/vision scan", "Capture + analyze screen")
-    table.add_row("/vision status", "Visual context status")
-    table.add_row("/mood [state]", "Set today's mood (normal|busy|tired|happy|lazy)")
-    table.add_row("/whois <contact>", "Show relationship profile")
-    table.add_row("/remember <c> <f>", "Store fact about contact")
-    table.add_row("/timer on|off", "Toggle task timing stats")
-    table.add_row("/improve [suggest]", "Self-evolution report & tips")
-    table.add_row("/optimize on|off", "Auto background code optimization")
-    table.add_row("/fix, /heal", "Auto-detect and fix code errors")
-    table.add_row("/quit, /q", "Exit")
+    table.add_row("/help, /?          ", "显示帮助(也可直接输入 help)")
+    table.add_row("/status            ", "系统状态")
+    table.add_row("/roles             ", "查看所有角色")
+    table.add_row("/token, /usage     ", "Token用量统计")
+    table.add_row("/timer on|off      ", "任务耗时统计开关")
+    table.add_row(f"/audit on|off      ", f"代码审查开关(当前: {'开' if AUDIT_ENABLED else '关'})")
+    table.add_row("/optimize on|off   ", "后台自动优化开关")
+    table.add_row("/improve           ", "进化报告 /improve suggest=建议")
+    table.add_row("/mood [状态]       ", "今日状态(normal/busy/tired/happy/lazy)")
+    table.add_row("/whois <联系人>    ", "查看联系人画像")
+    table.add_row("/remember <人> <事>", "记住关于联系人的事实")
+    table.add_row("/session [new/switch]", "会话管理")
+    table.add_row("/clear, /cls       ", "清屏")
+    table.add_row("/quit, /q          ", "退出")
     console.print(table)
-    console.print("\n[dim]💡 Multi-line: end a line with \\\\ to continue on the next line[/dim]")
+    console.print("\n[dim]💡 直接输入问题即可，不需要加任何前缀[/dim]")
 
 
 async def _cmd_self_heal(console):
@@ -869,6 +864,21 @@ def _cmd_optimize(console, user_input: str):
         console.print("[yellow]用法: /optimize on | off | status[/yellow]")
 
 
+def _cmd_audit(console, user_input: str):
+    from src.ceo.graph import AUDIT_ENABLED
+    parts = user_input.strip().split(maxsplit=1)
+    sub = parts[1].lower().strip() if len(parts) >= 2 else "status"
+    if sub in ("on", "1", "true"):
+        import src.ceo.graph as g; g.AUDIT_ENABLED = True
+        console.print("[green]📋 审计: 开启[/green]")
+    elif sub in ("off", "0", "false"):
+        import src.ceo.graph as g; g.AUDIT_ENABLED = False
+        console.print("[dim]📋 审计: 关闭[/dim]")
+    else:
+        status = "[green]开启[/green]" if AUDIT_ENABLED else "[dim]关闭[/dim]"
+        console.print(f"📋 审计: {status} | /audit on|off")
+
+
 def _cmd_vision(console, user_input, current_session):
     """Handle visual context commands: /vision scan|status|on|off"""
     from rich.panel import Panel
@@ -1008,9 +1018,28 @@ def main():
     
     if args.mode == "cli":
         if args.query:
+            query = args.query.strip()
+            
+            # Handle CLI commands in --query mode
+            if query.lower().startswith("/audit "):
+                sub = query.split(maxsplit=1)[1].lower()
+                import src.ceo.graph as g
+                if sub in ("on", "1", "true"):
+                    g.AUDIT_ENABLED = True
+                    print("📋 审计: 已开启")
+                elif sub in ("off", "0", "false"):
+                    g.AUDIT_ENABLED = False
+                    print("📋 审计: 已关闭")
+                import sys; sys.exit(0)
+            if query.lower() in ("/timer on", "/timer off"):
+                from src.utils.timing import timer
+                timer.enabled = (query.lower() == "/timer on")
+                print(f"⏱ 计时: {'开' if timer.enabled else '关'}")
+                import sys; sys.exit(0)
+            
             async def one_shot():
                 from src.ceo.graph import run_ceo
-                result = await run_ceo(args.query)
+                result = await run_ceo(query)
                 print(f"\n{'='*50}")
                 print(f"Phase: {result.get('phase')}")
                 print(f"Score: {result.get('score_card', {}).get('score', 'N/A')}/100")
