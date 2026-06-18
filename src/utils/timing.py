@@ -157,22 +157,26 @@ timer = Timer()
 
 # ─── LangChain callback for LLM timing ───
 
-class TimingCallback:
+from langchain_core.callbacks.base import BaseCallbackHandler
+
+
+class TimingCallback(BaseCallbackHandler):
     """LangChain callback that records LLM call duration."""
     
     def __init__(self, role: str = "unknown", model: str = "unknown"):
+        super().__init__()
         self.role = role
         self.model = model
         self._start: Optional[float] = None
     
-    def on_llm_start(self, *args, **kwargs):
+    # Duck-typing: LangChain checks for these methods by name, not inheritance
+    def on_llm_start(self, serialized=None, prompts=None, **kwargs):
         if timer.enabled:
             self._start = time.time()
     
-    def on_llm_end(self, response, *args, **kwargs):
+    def on_llm_end(self, response=None, **kwargs):
         if self._start and timer.enabled:
             elapsed = (time.time() - self._start) * 1000
-            # Try to get token count
             tokens = 0
             try:
                 if hasattr(response, 'llm_output') and response.llm_output:
@@ -182,3 +186,6 @@ class TimingCallback:
                 pass
             timer.record_llm(self.model, self.role, elapsed, tokens)
             self._start = None
+    
+    def on_llm_error(self, error=None, **kwargs):
+        self._start = None
