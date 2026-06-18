@@ -336,6 +336,9 @@ async def run_cli():
         if user_input.lower().startswith("/improve"):
             _cmd_improve(console, user_input)
             continue
+        if user_input.lower().startswith("/optimize"):
+            _cmd_optimize(console, user_input)
+            continue
         if user_input.lower() == "/status":
             _show_status(console, plat, roles, store)
             continue
@@ -459,6 +462,7 @@ def _show_help(console):
     table.add_row("/remember <c> <f>", "Store fact about contact")
     table.add_row("/timer on|off", "Toggle task timing stats")
     table.add_row("/improve [suggest]", "Self-evolution report & tips")
+    table.add_row("/optimize on|off", "Auto background code optimization")
     table.add_row("/fix, /heal", "Auto-detect and fix code errors")
     table.add_row("/quit, /q", "Exit")
     console.print(table)
@@ -819,6 +823,46 @@ def _cmd_improve(console, user_input: str):
     else:
         report = imp.report()
         console.print(report)
+
+
+def _cmd_optimize(console, user_input: str):
+    """Handle /optimize on|off|status command."""
+    from src.evolution.self_optimizer import get_optimizer
+    opt = get_optimizer()
+    parts = user_input.strip().split(maxsplit=1)
+    sub = parts[1].lower().strip() if len(parts) >= 2 else "status"
+    
+    if sub in ("on", "1", "true", "enable"):
+        opt.enable()
+        console.print("[green]🔧 自我优化: 已开启[/green]")
+        console.print("[dim]检测到问题后自动在后台修复（不影响主任务）[/dim]")
+    elif sub in ("off", "0", "false", "disable"):
+        console.print("[yellow]正在关闭自我优化...[/yellow]")
+        ok = opt.disable(blocking=True)
+        if ok:
+            console.print("[dim]🔧 自我优化: 已关闭（所有后台任务已完成）[/dim]")
+        else:
+            console.print("[red]⚠️ 关闭超时，仍有后台任务在运行[/red]")
+    elif sub in ("status", "s"):
+        st = opt.status()
+        status_icon = "🟢" if st["enabled"] else "⚫"
+        console.print(f"{status_icon} 自我优化: {'开启' if st['enabled'] else '关闭'}")
+        console.print(f"  活跃任务: {st['active'] or '无'}")
+        console.print(f"  队列: {st['queued']} | 已完成: {st['completed']} | 失败: {st['failed']}")
+        console.print(f"  速率: {st['hourly_count']}/{st['max_per_hour']} 每小时")
+        
+        # Show queue if any
+        try:
+            with opt._lock:
+                if opt._queue:
+                    console.print(f"\n  [dim]待处理 ({len(opt._queue)}):[/dim]")
+                    for t in opt._queue:
+                        icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(t.priority, "⚪")
+                        console.print(f"    {icon} {t.issue_name}: {t.description[:60]}")
+        except Exception:
+            pass
+    else:
+        console.print("[yellow]用法: /optimize on | off | status[/yellow]")
 
 
 def _cmd_vision(console, user_input, current_session):
