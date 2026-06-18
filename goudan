@@ -39,14 +39,21 @@ fi
 
 export AI_COMPANY_HOME="$AI_COMPANY_DIR"
 
-# Find Python (prefer python3, fallback to python)
+# Find Python — must be conda python3.12 (has prompt_toolkit etc.)
 PYTHON=""
-for cmd in python3 python; do
-    if command -v "$cmd" &>/dev/null; then
-        PYTHON="$cmd"
-        break
-    fi
-done
+# Prefer conda's python3.12 which has all dependencies
+if [ -x "/Users/v_liheng02/work/conda/anaconda3/bin/python3.12" ]; then
+    PYTHON="/Users/v_liheng02/work/conda/anaconda3/bin/python3.12"
+elif command -v python3.12 &>/dev/null; then
+    PYTHON="python3.12"
+else
+    for cmd in python3 python; do
+        if command -v "$cmd" &>/dev/null; then
+            PYTHON="$cmd"
+            break
+        fi
+    done
+fi
 
 if [ -z "$PYTHON" ]; then
     echo "❌ Python not found. Install Python 3.10+"

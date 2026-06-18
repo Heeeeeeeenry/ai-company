@@ -188,20 +188,33 @@ async def run_cli():
         """Read with Tab-completion for /commands."""
         try:
             from prompt_toolkit import PromptSession
-            from prompt_toolkit.completion import Completer, Completion
+            from prompt_toolkit.completion import Completer, Completion, CompleteEvent
+            from prompt_toolkit.styles import Style
             class _Cmd(Completer):
-                D = {"/help":"帮助","/status":"状态","/roles":"角色","/token":"用量",
-                     "/timer":"计时","/audit":"审查","/optimize":"优化","/improve":"报告",
-                     "/mood":"心情","/whois":"画像","/remember":"记忆","/session":"会话",
-                     "/vision":"视觉","/clear":"清屏","/quit":"退出","/fix":"修复"}
-                def get_completions(self, d, e):
-                    t = d.text_before_cursor
+                D = {"/help":"显示帮助","/status":"系统状态","/roles":"查看角色","/token":"Token用量",
+                     "/timer":"计时开关","/audit":"审查开关","/optimize":"自动优化","/improve":"进化报告",
+                     "/mood":"今日心情","/whois":"联系人画像","/remember":"记住事实","/session":"会话管理",
+                     "/vision":"视觉工具","/clear":"清屏","/quit":"退出","/fix":"自我修复",
+                     "/diag":"系统诊断","/sessions":"会话列表","/global":"全局记忆"}
+                def get_completions(self, document, complete_event):
+                    t = document.text_before_cursor
+                    if not t.startswith("/"):
+                        return
                     for c,v in self.D.items():
-                        if c.startswith(t): yield Completion(c, start_position=-len(t), display_meta=v)
+                        if c.startswith(t):
+                            yield Completion(c, start_position=-len(t),
+                                           display_meta=v, style="fg:ansicyan")
             if not hasattr(_read_input, "_s"):
-                _read_input._s = PromptSession(completer=_Cmd(), complete_while_typing=False)
+                _read_input._s = PromptSession(
+                    completer=_Cmd(),
+                    complete_while_typing=False,
+                    reserve_space_for_menu=8,
+                    complete_style=None,  # default COLUMN multi-column dropdown
+                )
             first = _read_input._s.prompt(prompt)
-        except Exception:
+        except Exception as e:
+            import logging; logging.getLogger("ai_company").warning(
+                f"Tab补全不可用(prompt_toolkit异常): {e}. 已降级为普通输入。")
             first = input(prompt)
         if not first or not first.strip():
             return first.strip()
