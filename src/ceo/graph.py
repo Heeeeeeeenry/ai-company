@@ -416,11 +416,31 @@ def _safe_node(name: str):
     through to deliver with a clear error message instead of crashing.
     
     Also records execution time when timer.enabled.
+    Emits status line so user knows what's happening.
     """
+    # Node labels in Chinese for status display
+    _NODE_LABEL = {
+        "Triage": "分析意图",
+        "PM": "制定计划",
+        "Architect": "架构设计",
+        "Execute": "准备执行",
+        "Department": "执行任务",
+        "Auditor": "代码审查",
+        "PMO": "合规检查",
+        "VerifyAggregate": "结果验证",
+        "AutoRepair": "自动修复",
+        "Deliver": "生成回复",
+    }
     def decorator(fn):
         async def wrapper(state, *args, **kwargs):
             from src.utils.timing import timer
             timer.start(name, "node")
+            label = _NODE_LABEL.get(name, name)
+            # Emit progress: show phase transition (skip for Deliver — shown at end)
+            if name != "Deliver":
+                dept = state.get("department", "") if isinstance(state, dict) else getattr(state, "department", "")
+                dept_hint = f" ({dept})" if dept and name in ("Department", "Execute") else ""
+                print(f"  → {label}{dept_hint}", flush=True)
             try:
                 return await fn(state, *args, **kwargs)
             except Exception as e:

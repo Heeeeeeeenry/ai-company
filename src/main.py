@@ -381,27 +381,20 @@ async def run_cli():
             continue
 
         console.print()
-        # Show cursor during thinking (Rich spinner hides it; ensure restore)
-        console.show_cursor(True)
         t_start = time.time()
-        with console.status("[dim]处理中…[/dim]", spinner="dots"):
-            t0 = time.time()
-            try:
-                result = await run_ceo(user_input)
-            except (KeyboardInterrupt, asyncio.CancelledError):
-                console.print("\n  [yellow]Task cancelled by user.[/yellow]")
-                continue
-            except Exception as e:
-                logger.exception("CEO workflow crashed")
-                console.print(f"  [red]✗ Error: {type(e).__name__}: {e}[/red]")
-                import traceback
-                tb = traceback.format_exc()
-                console.print(f"  [dim]{tb.split(chr(10))[-4]}[/dim]")
-                continue
-            elapsed = time.time() - t0
+        try:
+            result = await run_ceo(user_input)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            console.print("\n  [yellow]Task cancelled by user.[/yellow]")
+            continue
+        except Exception as e:
+            logger.exception("CEO workflow crashed")
+            console.print(f"  [red]✗ Error: {type(e).__name__}: {e}[/red]")
+            import traceback
+            tb = traceback.format_exc()
+            console.print(f"  [dim]{tb.split(chr(10))[-4]}[/dim]")
+            continue
         total_elapsed = time.time() - t_start
-        # Ensure cursor is visible after spinner
-        console.show_cursor(True)
 
         phase = result.get("phase", "?")
         score = result.get("score_card", {}).get("final_score",
@@ -414,8 +407,7 @@ async def run_cli():
         verdict_color = "green" if isinstance(score, (int, float)) and score >= 70 else \
                         "yellow" if isinstance(score, (int, float)) and score >= 50 else "red"
         console.print(
-            f"  [{verdict_color}]●[/{verdict_color}] {phase} | score: {score} | {elapsed:.1f}s" +
-            (f" (total {total_elapsed:.1f}s)" if total_elapsed > elapsed + 1 else "")
+            f"  [{verdict_color}]●[/{verdict_color}] {phase} | score: {score} | {total_elapsed:.1f}s"
         )
         if verdict and verdict != phase:
             console.print(f"  verdict: {verdict}", style="dim")
