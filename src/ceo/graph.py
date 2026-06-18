@@ -427,6 +427,24 @@ async def triage_node(state: CEOState) -> dict:
     from src.utils.timing import timer
     timer.start_task()  # start the overall task timer
     
+    task = state.get("user_request", "").strip()
+    
+    # ═══ Trivial query fast-path: never route to AI pipeline ═══
+    trivial_set = {
+        "help", "?", "h", "hi", "hello", "hey", "你好", "您好",
+        "thanks", "thx", "ok", "好的", "test", "测试",
+    }
+    if task.lower() in trivial_set:
+        return {
+            "phase": "deliver",
+            "department": "ceo",
+            "task_type": "LOCAL_SYSTEM",
+            "final_output": "👋 你好！输入 /help 查看可用命令，或直接问我问题。",
+            "score_card": {"score": 100, "decision": "APPROVE", "final_score": 100,
+                          "next_action": "deliver"},
+            "execution_log": ["[TRIAGE] Trivial query → direct reply, skip pipeline"],
+        }
+    
     from src.departments.roles import role_registry
 
     llm = _get_llm("ceo")
@@ -434,7 +452,7 @@ async def triage_node(state: CEOState) -> dict:
     agent_state.set_task(state["user_request"])
     
     # ═══ WeChat Send Fast-Path: direct execution, no agent loop ═══
-    task = state.get("user_request", "")
+    # task already defined above with .strip()
     
     # ─── Conversation Fast-Path (AI-powered chat) ───
     conv_request = _extract_wechat_conversation_request(task)

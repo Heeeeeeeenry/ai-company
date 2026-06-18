@@ -300,9 +300,13 @@ async def run_cli():
                     pass
                 session_mgr.save_all()
             console.print("  👋 Bye!")
-            break
-        if user_input.lower() in ("/help", "/?"):
+        # ── Built-in commands ──
+        if user_input.lower() in ("/help", "/?", "help", "?", "h"):
             _show_help(console)
+            continue
+        # Greetings / trivial — never route to AI
+        if user_input.lower().strip() in ("hi", "hello", "hey", "你好", "您好", "thanks", "thx", "ok", "好的"):
+            console.print("[dim]👋 你好！输入 /help 查看命令，或直接问我问题。[/dim]")
             continue
         # ── Session commands ──
         if user_input.lower().startswith("/session") or user_input.lower() == "/sessions":
