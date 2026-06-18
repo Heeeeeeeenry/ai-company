@@ -179,14 +179,17 @@ class WechatCoordinator:
         click instead.  For normal contacts: press Enter after vision confirms.
         """
         is_file_transfer = (contact == "文件传输助手")
+        # 文件传输助手搜索技巧: 搜完整名会被消息历史淹没,搜短词\"文件\"即可命中
+        search_text = "文件" if is_file_transfer else contact
+        verify_contact = contact  # still verify against full name
 
         for attempt in range(self.MAX_RETRIES_PER_STATE):
-            # Type contact name (pbcopy + Cmd+V — supports Chinese)
-            self.action.type_text(contact)
+            # Type search text (pbcopy + Cmd+V — supports Chinese)
+            self.action.type_text(search_text)
             time.sleep(1.5)
 
             # Verify contact appears in search results via Qwen-VL (exact match only)
-            vision_result = self.vision.find_contact(contact)
+            vision_result = self.vision.find_contact(verify_contact)
             if not vision_result or not vision_result.get("found") or not vision_result.get("is_exact_match"):
                 logger.warning("Vision: contact '%s' not exactly found (attempt %d): %s", 
                              contact, attempt+1, vision_result.get("contact_name","?") if vision_result else "None")
