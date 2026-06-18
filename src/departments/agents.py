@@ -132,9 +132,9 @@ class DepartmentAgent:
         # Researcher needs more iterations for search→fetch→analyze workflow
         # Developer needs more for code review: explore→read→analyze→fix→verify
         default_iter = {
-            "researcher": "4",
+            "researcher": "3",  # reduced from 4: search→fetch→final is enough
             "developer": "8",
-        }.get(role.name, "5")
+        }.get(role.name, "4")
         try:
             self.max_iterations = int(os.environ.get("TOOL_MAX_ITERATIONS", default_iter))
         except (ValueError, TypeError):

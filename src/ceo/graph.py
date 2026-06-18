@@ -1102,6 +1102,26 @@ def _get_fallback_criteria(department: str, task_type: str) -> str:
 @_safe_node("PM")
 async def pm_analyze_node(state: CEOState) -> dict:
     """PM: produces PRD with acceptance criteria."""
+    import re
+    task = state.get("user_request", "")
+    task_lower = task.lower() if task else ""
+    
+    # Fast-path: skip PM LLM call for document/PDF tasks
+    is_doc_task = bool(re.search(
+        r"pdf|生成.*文档|写报告|生成报告|写文档|周报|月报|日报|会议纪要|写总结|导出.*pdf|统计.*导出",
+        task_lower
+    )) if task_lower else False
+    
+    if is_doc_task:
+        return {
+            "phase": "execute",
+            "plan": {
+                "summary": task,
+                "prd": {"summary": task, "features": [], "acceptance_criteria": [], "edge_cases": [], "priority": "P1"},
+            },
+            "execution_log": ["[PM] Document task -> skip LLM, direct execute"],
+        }
+    
     from src.departments.roles import role_registry
 
     pm_role = role_registry.get("pm")

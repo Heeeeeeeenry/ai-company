@@ -35,6 +35,39 @@ def _get_tavily():
 
 def web_search(query: str, max_results: int = 5) -> str:
     """Search the web using Tavily API. Returns structured results."""
+    import re as _vre
+    
+    # ── Curated: known reliable URLs for common queries ──
+    query_lower = query.lower()
+    curated = None
+    if _vre.search(r"gold|金价|黄金|gold price", query_lower):
+        curated = (
+            "📊 Gold Price Data Sources (reliable, no API needed):\n"
+            "1. Kitco 30-day chart\n"
+            "   https://www.kitco.com/charts/livegold.html\n"
+            "2. Macrotrends historical gold prices\n"
+            "   https://www.macrotrends.net/1333/historical-gold-prices-100-year-chart\n"
+            "3. APMEX gold spot price\n"
+            "   https://www.apmex.com/gold-price\n\n"
+            "Use web_fetch on macrotrends.net for historical monthly data (table format).\n"
+            "Use web_fetch on apmex.com for current spot price."
+        )
+    elif _vre.search(r"silver|银价|白银", query_lower):
+        curated = (
+            "📊 Silver Price Sources:\n"
+            "1. https://www.macrotrends.net/1470/historical-silver-prices-100-year-chart\n"
+            "2. https://www.apmex.com/silver-price\n"
+        )
+    elif _vre.search(r"bitcoin|btc|比特币", query_lower):
+        curated = (
+            "📊 Bitcoin Price Sources:\n"
+            "1. https://www.coindesk.com/price/bitcoin\n"
+            "2. https://coinmarketcap.com/currencies/bitcoin/historical-data/\n"
+        )
+    
+    if curated:
+        return curated
+    
     client = _get_tavily()
     if not client:
         return "SEARCH UNAVAILABLE: Tavily not installed. Run: pip install tavily-python"
