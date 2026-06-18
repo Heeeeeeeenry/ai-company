@@ -333,6 +333,9 @@ async def run_cli():
         if user_input.lower().startswith("/timer"):
             _cmd_timer(console, user_input)
             continue
+        if user_input.lower().startswith("/improve"):
+            _cmd_improve(console, user_input)
+            continue
         if user_input.lower() == "/status":
             _show_status(console, plat, roles, store)
             continue
@@ -455,6 +458,7 @@ def _show_help(console):
     table.add_row("/whois <contact>", "Show relationship profile")
     table.add_row("/remember <c> <f>", "Store fact about contact")
     table.add_row("/timer on|off", "Toggle task timing stats")
+    table.add_row("/improve [suggest]", "Self-evolution report & tips")
     table.add_row("/fix, /heal", "Auto-detect and fix code errors")
     table.add_row("/quit, /q", "Exit")
     console.print(table)
@@ -787,6 +791,34 @@ def _cmd_timer(console, user_input: str):
         status = "[green]开启[/green]" if timer.enabled else "[dim]关闭[/dim]"
         console.print(f"⏱ 耗时统计: {status}")
         console.print("[dim]用法: /timer on | off[/dim]")
+
+
+def _cmd_improve(console, user_input: str):
+    """Handle /improve [report|suggestions|clear] command."""
+    from src.evolution.self_improve import get_improver, auto_improve
+    imp = get_improver()
+    parts = user_input.strip().split(maxsplit=1)
+    sub = parts[1].lower().strip() if len(parts) >= 2 else "report"
+    
+    if sub in ("suggestions", "suggest", "tips"):
+        suggestions = imp.get_suggestions()
+        if suggestions:
+            console.print(f"\n[bold]💡 优化建议 ({len(suggestions)}条):[/bold]")
+            for s in suggestions:
+                icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(s["priority"], "⚪")
+                console.print(f"  {icon} [{s['priority']}] {s['name']}")
+                console.print(f"     命中 {s['hits']}次 → {s['fix']}")
+                console.print(f"     📍 {s['code_hint']}")
+        else:
+            console.print("[dim]暂无优化建议（需要更多运行数据）[/dim]")
+    elif sub in ("clear", "reset"):
+        imp.learnings.clear()
+        imp.pattern_hits.clear()
+        imp._save()
+        console.print("[green]✓ 进化数据已清除[/green]")
+    else:
+        report = imp.report()
+        console.print(report)
 
 
 def _cmd_vision(console, user_input, current_session):

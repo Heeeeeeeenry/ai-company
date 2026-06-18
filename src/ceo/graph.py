@@ -1951,6 +1951,35 @@ async def deliver_node(state: CEOState) -> dict:
     except Exception:
         pass
     
+    # ── Self-improvement: capture task outcome ──
+    try:
+        from src.evolution.self_improve import get_improver
+        imp = get_improver()
+        execution_log = state.get("execution_log", [])
+        # Capture errors from log
+        for entry in execution_log:
+            entry_str = str(entry)
+            if "FAILED" in entry_str or "Crashed" in entry_str or "CRASHED" in entry_str:
+                imp.capture_error(entry_str[:300], {
+                    "task": state.get("user_request", "")[:200],
+                    "department": state.get("department", "unknown"),
+                })
+        # Capture tool failures
+        for entry in execution_log:
+            if "Tool failures" in str(entry):
+                m = re.search(r"(\d+)/(\d+)", str(entry))
+                if m:
+                    imp.capture_error(f"Tool failure ratio: {m.group(1)}/{m.group(2)}", {
+                        "tool_calls": int(m.group(2)),
+                        "tool_failures": int(m.group(1)),
+                    })
+        # Resource check
+        warning = imp.check_resources()
+        if warning:
+            dept_output = str(dept_output) + f"\n\n⚠️ {warning}"
+    except Exception:
+        pass
+    
     return {
         "phase": "complete",
         "final_output": dept_output,
