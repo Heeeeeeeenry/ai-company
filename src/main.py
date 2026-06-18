@@ -282,11 +282,15 @@ async def run_cli():
     
     # Show memory status on startup
     try:
+        from src.memory.hermes import hermes_memory
+        s = hermes_memory.stats()
         from src.session import get_session_memory
         mem = get_session_memory(current_session.id)
         convs = mem.get_recent_conversations(1)
         if convs:
-            console.print(f"  [dim]🧠 记忆已恢复 ({current_session.message_count} 条对话)[/dim]")
+            console.print(f"  [dim]🧠 记忆: {s['total_chars']}chars ({s['memory_entries']}mem+{s['user_entries']}user) | {current_session.message_count} 条对话[/dim]")
+        else:
+            console.print(f"  [dim]🧠 记忆: {s['total_chars']}chars ({s['memory_entries']} facts) | /memory 管理[/dim]")
     except Exception:
         pass
     console.print()
@@ -375,8 +379,11 @@ async def run_cli():
         if user_input.lower() in ("/token", "/token_usage", "/usage"):
             _show_token_stats(console)
             continue
-        if user_input.lower() == "/memory":
-            await show_memory(do_compact=False, do_clear=False)
+        if user_input.lower().startswith("/memory") or user_input.lower().startswith("/mem "):
+            _cmd_memory(console, user_input)
+            continue
+        if user_input.lower() in ("/mem", "/memory"):
+            _cmd_memory(console, user_input)
             continue
         if user_input.lower() in ("/clear", "/cls"):
             console.clear()
@@ -788,6 +795,116 @@ def _cmd_remember(console, user_input: str):
     from src.wechat.relationship import add_fact
     add_fact(contact, fact)
     console.print(f"[green]✓ 已记住关于 {contact} 的事实:[/green] {fact}")
+
+
+def _cmd_memory(console, user_input: str):
+    """Handle /memory commands — Hermes-style memory management.
+    
+    /memory                 Show memory stats
+    /memory add <text>      Add declarative fact
+    /memory replace <old> <new>  Replace by substring match
+    /memory remove <text>   Remove by text match
+    /memory search <query>  Search memory
+    /memory user            Show user profile
+    /memory sessions        Show recent sessions
+    /memory find <query>    Search past conversations
+    """
+    from src.memory.hermes import hermes_memory
+    from src.memory.search import session_search, session_search_recent
+
+    parts = user_input.strip().split(maxsplit=2)
+    cmd = parts[1].lower() if len(parts) > 1 else ""
+    arg = parts[2] if len(parts) > 2 else ""
+
+    if not cmd or cmd in ("stats", "status"):
+        s = hermes_memory.stats()
+        console.print(f"  [bold]🧠 记忆统计[/bold]")
+        console.print(f"  Memory: {s['memory_entries']} entries ({s['memory_chars']} chars, {s['memory_pct']}% budget)")
+        console.print(f"  User:   {s['user_entries']} entries ({s['user_chars']} chars, {s['user_pct']}% budget)")
+        if s['memory_pct'] > 50 or s['user_pct'] > 50:
+            console.print(f"  [yellow]⚠ 记忆使用率偏高[/yellow]")
+
+    elif cmd == "add":
+        if not arg:
+            console.print("[yellow]Usage: /memory add <declarative fact>[/yellow]")
+            return
+        entry = hermes_memory.add(arg, "memory")
+        console.print(f"[green]✓ 已添加:[/green] {entry.get('text','')[:60]}...")
+
+    elif cmd == "replace":
+        args_split = arg.split(" || ", 1)
+        if len(args_split) < 2:
+            console.print("[yellow]Usage: /memory replace <旧文本> || <新文本>[/yellow]")
+            return
+        ok = hermes_memory.replace(args_split[0].strip(), args_split[1].strip(), "memory")
+        if ok:
+            console.print("[green]✓ 已替换[/green]")
+        else:
+            console.print("[yellow]未找到唯一匹配项[/yellow]")
+
+    elif cmd == "remove":
+        if not arg:
+            console.print("[yellow]Usage: /memory remove <文本片段>[/yellow]")
+            return
+        matches = hermes_memory.search(arg, "memory")
+        if not matches:
+            console.print("[dim]没有匹配的记忆条目[/dim]")
+            return
+        console.print(f"[yellow]将删除 {len(matches)} 条:[/yellow]")
+        for m in matches:
+            console.print(f"  [dim]- {m['text'][:80]}[/dim]")
+        console.print("[dim]确认: /memory remove-force <文本片段>[/dim]")
+
+    elif cmd == "remove-force":
+        if not arg:
+            return
+        n = hermes_memory.remove(arg, "memory")
+        console.print(f"[green]✓ 已删除 {n} 条[/green]")
+
+    elif cmd == "search":
+        if not arg:
+            console.print("[yellow]Usage: /memory search <关键词>[/yellow]")
+            return
+        results = hermes_memory.search(arg, "memory")
+        if not results:
+            console.print("[dim]无匹配[/dim]")
+            return
+        console.print(f"[bold]🔍 '{arg}' — {len(results)} 条:[/bold]")
+        for r in results:
+            cat = f"[{r.get('category','')}]" if r.get('category') else ""
+            console.print(f"  {cat} [dim]({r['score']:.2f})[/dim] {r['text'][:100]}")
+
+    elif cmd == "user":
+        entries = hermes_memory.list("user")
+        console.print(f"[bold]👤 用户画像 ({len(entries)} 条):[/bold]")
+        for e in entries:
+            console.print(f"  - {e['text']}")
+
+    elif cmd in ("sessions", "recent"):
+        sessions = session_search_recent(5)
+        if not sessions:
+            console.print("[dim]暂无会话[/dim]")
+            return
+        console.print(f"[bold]📋 最近会话:[/bold]")
+        for s in sessions:
+            console.print(f"  [{s['session_name']}] {s['message_count']}条 | {s['preview'][:50]}")
+
+    elif cmd in ("find", "search-sessions"):
+        if not arg:
+            console.print("[yellow]Usage: /memory find <关键词>[/yellow]")
+            return
+        results = session_search(arg, 5)
+        if not results:
+            console.print(f"[dim]未找到包含 '{arg}' 的对话[/dim]")
+            return
+        console.print(f"[bold]🔍 对话搜索 '{arg}' — {len(results)} 条:[/bold]")
+        for r in results:
+            console.print(f"  [{r['session_name']}] score={r['score']:.2f}")
+            console.print(f"    Q: {r['user'][:80]}")
+            console.print(f"    A: {r['assistant'][:80]}")
+
+    else:
+        console.print("[yellow]命令: stats, add, replace, remove, search, user, sessions, find[/yellow]")
 
 
 def _cmd_timer(console, user_input: str):

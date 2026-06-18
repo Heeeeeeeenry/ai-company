@@ -1,26 +1,15 @@
-"""Memory Module — 统一记忆系统。
-
-组件:
-  - MemoryLayer: 三级记忆（Session/User/Knowledge）
-  - EpisodeMemory: 情节记忆（Graphiti + 本地回退）
-  - AgentState: Agent 工作记忆
-  - ArtifactStore: 共享文件存储
-"""
-
-from .layer import MemoryLayer, memory_layer, DEFAULT_KNOWLEDGE, DEFAULT_USER
-from .store import EpisodeMemory, AgentState
-from .artifacts import ArtifactStore, artifact_store
+# Memory Module
+from src.memory.store import EpisodeMemory, AgentState, PendingProposal, get_agent_state, get_memory_health
+from src.memory.artifacts import artifact_store
+from src.memory.layer import MemoryLayer, memory_layer
+from src.memory.hermes import HermesMemory, hermes_memory
+from src.memory.search import session_search, session_search_recent
 
 __all__ = [
-    # MemoryLayer (三级记忆)
-    "MemoryLayer",
-    "memory_layer",
-    "DEFAULT_KNOWLEDGE",
-    "DEFAULT_USER",
-    # Store (情节/工作记忆)
-    "EpisodeMemory",
-    "AgentState",
-    # Artifacts
-    "ArtifactStore",
+    "EpisodeMemory", "AgentState", "PendingProposal",
+    "get_agent_state", "get_memory_health",
     "artifact_store",
+    "MemoryLayer", "memory_layer",
+    "HermesMemory", "hermes_memory",
+    "session_search", "session_search_recent",
 ]

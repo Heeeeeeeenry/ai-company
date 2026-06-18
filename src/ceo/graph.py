@@ -2213,52 +2213,49 @@ def build_ceo_graph() -> StateGraph:
 # ═══ Session Memory Context Injection ═══
 
 def _inject_session_context(state: dict) -> None:
-    """Load session history + user/knowledge memory and inject into state.
+    """Load session history + Hermes memory and inject into state.
     
-    Injects:
-    1. Recent conversation turns (last 10) as context
-    2. User preferences from MemoryLayer
-    3. Session memories (key facts learned)
+    Injects in Hermes format:
+    1. USER PROFILE — compact declarative facts
+    2. MEMORY — durable facts with [N%] budget indicator
+    3. Recent conversation turns (last 5, compact)
     """
     context_parts = []
     
-    # ── Load session conversation history ──
+    # ── Hermes Memory (User Profile + Durable Facts) ──
+    try:
+        from src.memory.hermes import hermes_memory
+        hermes_ctx = hermes_memory.get_full_context()
+        if hermes_ctx.strip():
+            context_parts.append(hermes_ctx)
+    except Exception:
+        pass
+    
+    # ── Recent conversation turns (compact, last 5) ──
     try:
         from src.session import get_session_manager
         from src.session.memory import get_session_memory
         mgr = get_session_manager()
         if mgr.current:
             mem = get_session_memory(mgr.current.id)
-            history = mem.get_recent_conversations(10)
+            history = mem.get_recent_conversations(5)
             if history:
                 turns = []
                 for t in history:
-                    q = t.get("user", "")[:200]
-                    a = t.get("assistant", "")[:200]
+                    q = t.get("user", "")[:150]
+                    a = t.get("assistant", "")[:150]
                     if q or a:
                         turns.append(f"Q: {q}\nA: {a}")
                 if turns:
-                    context_parts.append("## 最近的对话历史\n" + "\n---\n".join(turns))
-    except Exception:
-        pass
-    
-    # ── Load MemoryLayer (User + Knowledge) ──
-    try:
-        from src.memory.layer import memory_layer
-        mem_ctx = memory_layer.get_context_for_prompt()
-        if mem_ctx.strip():
-            context_parts.append(mem_ctx)
+                    context_parts.append("## 最近对话 (Recent Conversation)\n" + "\n---\n".join(turns))
     except Exception:
         pass
     
     if context_parts:
         full_context = "\n\n".join(context_parts)
-        # Inject as system message at the start
         from langchain_core.messages import SystemMessage
-        state["messages"].insert(0, SystemMessage(
-            content=f"[系统记忆 — 跨会话持久化]\n{full_context}"
-        ))
-        state["execution_log"] = [f"[MEMORY] Loaded session context ({len(context_parts)} sections)"]
+        state["messages"].insert(0, SystemMessage(content=full_context))
+        state["execution_log"] = [f"[MEMORY] Loaded context ({sum(len(p) for p in context_parts)} chars)"]
 
 
 async def run_ceo(user_message: str) -> CEOState:
