@@ -1499,8 +1499,18 @@ _LEGACY_TO_V5_INTENT = {
 
 @_safe_node("VerifyAggregate")
 async def verify_aggregate_node(state: CEOState) -> dict:
-    """Node function."""
-    
+    """Node function."""    
+    def _is_fail(output: str, exec_log: list) -> bool:
+        """Check if output indicates a real failure (not just non-empty)."""
+        patterns = [
+            r"Max iterations exhausted", r"CRASHED", r"FAILED",
+            r"\u65e0\u6cd5\u83b7\u53d6\u5b9e\u65f6", r"\u6839\u636e\u5df2\u77e5\u6570\u636e",
+            r"cannot\s+(?:access|fetch|retrieve)",
+            r"NameError", r"TypeError", r"KeyError",
+        ]
+        combined = output + " " + " ".join(str(x) for x in exec_log)
+        return any(re.search(p, combined, re.IGNORECASE) for p in patterns)
+
     score_card = state.get("score_card") or {}
     pmo_result = state.get("pmo_result") or {}
     department = state.get("department", "")
@@ -1510,7 +1520,8 @@ async def verify_aggregate_node(state: CEOState) -> dict:
     # ═══ Fast-lane: COMMAND_EXECUTION or LOCAL_SYSTEM — never audit, just check stdout ═══
     if task_type in ("COMMAND_EXECUTION", "LOCAL_SYSTEM"):
         final_output = str(state.get("final_output", ""))
-        has_output = bool(final_output.strip())
+        _el = state.get("execution_log", [])
+        has_output = bool(final_output.strip()) and not _is_fail(final_output, _el)
         return {
             "phase": "deliver",
             "workspace_id": workspace_id,
@@ -1528,7 +1539,8 @@ async def verify_aggregate_node(state: CEOState) -> dict:
     # ═══ Fast-lane: SIMPLE_QUERY — skip audit for fact lookups ═══
     if task_type == "SIMPLE_QUERY":
         final_output = str(state.get("final_output", ""))
-        has_output = bool(final_output.strip())
+        _el = state.get("execution_log", [])
+        has_output = bool(final_output.strip()) and not _is_fail(final_output, _el)
         return {
             "phase": "deliver",
             "workspace_id": workspace_id,
