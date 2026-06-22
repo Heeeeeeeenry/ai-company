@@ -2282,23 +2282,45 @@ async def deliver_node(state: CEOState) -> dict:
         except Exception:
             pass
     
-    # ── Skill Learning: capture successful workflows ──
-    if score and int(score or 0) >= 60 and workspace_id:
+    # ── Auto Skill Discovery: capture complex successful workflows ──
+    if score and int(score or 0) >= 70:
         try:
+            from src.learning.auto_discovery import auto_discovery
             from src.learning import skill_library
-            ws = TaskContext.load(workspace_id)
+            ws = TaskContext.load(workspace_id) if workspace_id else None
+            tool_calls_data = []
             if ws:
                 context_data = ws._read("context.md", "")
                 tool_calls_data = _parse_tools_from_timeline(context_data)
-                caps_data = _parse_capabilities_from_timeline(context_data)
-                if tool_calls_data:
-                    skill_library.capture(
-                        task=state.get("user_request", ""),
-                        department=str(dept),
-                        tool_calls=tool_calls_data,
-                        capabilities=caps_data,
-                        success=True,
-                    )
+            # Also try from execution log
+            if not tool_calls_data:
+                exec_log = state.get("execution_log", [])
+                for entry in exec_log:
+                    if isinstance(entry, str) and "Tools:" in entry:
+                        tools_str = entry.split("Tools:")[-1].strip()
+                        for t in tools_str.split(","):
+                            t = t.strip()
+                            if t:
+                                tool_calls_data.append({"tool": t, "success": True})
+            
+            if tool_calls_data and len(tool_calls_data) >= 3:
+                # Auto-discover: filter → extract → save
+                auto_discovery.discover(
+                    task=state.get("user_request", ""),
+                    tool_calls=tool_calls_data,
+                    score=int(score or 0),
+                    department=str(dept),
+                )
+            elif tool_calls_data:
+                # Fallback: old capture for simpler tasks
+                caps_data = _parse_capabilities_from_timeline(context_data) if ws and context_data else []
+                skill_library.capture(
+                    task=state.get("user_request", ""),
+                    department=str(dept),
+                    tool_calls=tool_calls_data,
+                    capabilities=caps_data,
+                    success=True,
+                )
         except Exception:
             import logging
             logging.getLogger("ai_company.learning").debug("Skill capture failed", exc_info=True)
