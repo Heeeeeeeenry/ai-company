@@ -514,7 +514,7 @@ async def _cmd_self_heal(console):
             f"Result: {'✅ Fixed' if last.get('data', {}).get('result') else '❌ Failed'}",
             title="Previous Repair",
         ))
-        return
+        # Don't return — continue scanning for new errors below
 
     # Try to find error from experience records
     records = store._records[-5:] if hasattr(store, '_records') else []

@@ -115,9 +115,22 @@ def _clean_output(raw: str) -> str:
                 return inner.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"')
             else:
                 i += 1
-    # If raw looks like JSON, strip it entirely
+    # If raw looks like JSON, strip it entirely — but ONLY if it contains a tool call wrapper
+    # (\"action\": \"tool\" or \"action\": \"final\"), not if it's legitimate content
     if raw.strip().startswith('{') and raw.strip().endswith('}'):
-        return "Output format error. Please ask again or use /fix."
+        try:
+            parsed = json.loads(raw.strip())
+            if isinstance(parsed, dict):
+                action = parsed.get("action", "")
+                if action in ("tool", "final") or action in (
+                    "web_search", "web_fetch", "market_series",
+                    "read_file", "write_file", "list_dir",
+                    "run_python", "run_test", "lint_code",
+                ):
+                    return "Output format error. Please ask again or use /fix."
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # If it's valid JSON but NOT a tool wrapper, it's legitimate content — return as-is
     # ── Compliance boilerplate detection ──
     # deepseek-v4-pro sometimes outputs compliance ack instead of answer
     _cl = raw.strip()
