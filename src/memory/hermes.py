@@ -15,11 +15,16 @@ Injection priority: user preferences > environment facts > procedural knowledge.
 Each entry tracks created_at and access_count for optimal token usage.
 """
 
+from __future__ import annotations
+
 import json
 import os
+import logging
 from datetime import datetime
 from threading import Lock
 from typing import Optional
+
+logger = logging.getLogger("ai_company.hermes_memory")
 
 DATA_DIR = os.path.expanduser("~/.ai-company")
 MEMORY_FILE = os.path.join(DATA_DIR, "hermes_memory.json")
@@ -91,6 +96,7 @@ class HermesMemory:
         self._memory: list[dict] = []
         self._user: list[dict] = []
         self._lock = Lock()
+        self._vector_store = None  # Lazy init
         self._load()
 
     # ═══ Load / Save ═══
@@ -136,6 +142,31 @@ class HermesMemory:
         with open(MEMORY_FILE, "w") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
+    def _get_vector_store(self):
+        """Lazy-init vector store for semantic search."""
+        if self._vector_store is None:
+            try:
+                from src.memory.vector_store import VectorMemoryStore
+                self._vector_store = VectorMemoryStore()
+                # Sync existing entries into vector store
+                self._sync_to_vector_store()
+            except ImportError as e:
+                logger.warning("Vector store unavailable: %s", e)
+            except Exception as e:
+                logger.warning("Vector store init failed: %s", e)
+        return self._vector_store
+
+    def _sync_to_vector_store(self):
+        """Rebuild vector index from current memory entries."""
+        vs = self._vector_store
+        if vs is None:
+            return
+        with self._lock:
+            all_texts = [e["text"] for e in self._memory]
+            all_metas = [{k: v for k, v in e.items() if k != "text"} for e in self._memory]
+        if all_texts:
+            vs.build_index(all_texts, all_metas)
+
     # ═══ Core Operations ═══
 
     def add(self, text: str, target: str = "memory", category: str = "") -> dict:
@@ -159,6 +190,7 @@ class HermesMemory:
             entry["category"] = category
 
         store = self._memory if target == "memory" else self._user
+        is_new = True
         with self._lock:
             # Check for duplicates
             for existing in store:
@@ -169,6 +201,16 @@ class HermesMemory:
                     return existing
             store.append(entry)
         self._save()
+
+        # Sync to vector store (memory target only)
+        if target == "memory" and is_new:
+            try:
+                vs = self._get_vector_store()
+                if vs:
+                    vs.add(text.strip(), {k: v for k, v in entry.items() if k != "text"})
+            except Exception as e:
+                logger.warning("Vector store add failed: %s", e)
+
         return entry
 
     def replace(self, old_text: str, new_text: str, target: str = "memory") -> bool:
@@ -183,14 +225,28 @@ class HermesMemory:
             True if a match was found and replaced, False otherwise.
         """
         store = self._memory if target == "memory" else self._user
+        replaced = False
         with self._lock:
             matches = [e for e in store if old_text in e.get("text", "")]
             if len(matches) != 1:
                 return False  # Need exactly one match for safety
             matches[0]["text"] = new_text.strip()
             matches[0]["updated_at"] = datetime.now().isoformat()
-        self._save()
-        return True
+            replaced = True
+        if replaced:
+            self._save()
+            # Sync to vector store: remove old, add new
+            if target == "memory":
+                try:
+                    vs = self._get_vector_store()
+                    if vs:
+                        vs.remove_by_text(old_text)
+                        vs.add(new_text.strip(), {
+                            k: v for k, v in matches[0].items() if k != "text"
+                        })
+                except Exception as e:
+                    logger.warning("Vector store replace failed: %s", e)
+        return replaced
 
     def remove(self, text: str, target: str = "memory") -> int:
         """Remove memory entries matching text substring. Requires confirmation.
@@ -217,6 +273,14 @@ class HermesMemory:
                 self._user = new_store
         if removed:
             self._save()
+            # Sync to vector store
+            if target == "memory":
+                try:
+                    vs = self._get_vector_store()
+                    if vs:
+                        vs.remove_by_text(text)
+                except Exception as e:
+                    logger.warning("Vector store remove failed: %s", e)
         return removed
 
     def list(self, target: str = "memory") -> list[dict]:
@@ -227,21 +291,96 @@ class HermesMemory:
 
     def search(self, query: str, target: str = "memory"):
         # Returns list of dict
-        """Search memory entries by keyword.
+        """Hybrid search: vector semantic (0.6) + keyword (0.4).
 
-        Returns entries containing the query, scored by substring match.
+        Returns entries sorted by combined score.
+        Falls back to keyword-only if vector store unavailable.
         """
         store = self._memory if target == "memory" else self._user
+
+        # ── Vector semantic search ──
+        vector_results: dict[str, float] = {}  # text → score
+        try:
+            vs = self._get_vector_store()
+            if vs and not vs.is_empty:
+                vec_hits = vs.search(query, top_k=min(len(store), 10))
+                for hit in vec_hits:
+                    vector_results[hit["text"]] = hit["score"]
+        except Exception as e:
+            logger.warning("Vector search failed, falling back to keyword: %s", e)
+
+        # ── Keyword search (substring) ──
         query_lower = query.lower()
-        results = []
+        keyword_results: dict[str, float] = {}
         for e in store:
             text = e.get("text", "")
             if query_lower in text.lower():
-                # Score: exact match > word match > substring
                 score = 1.0 if query_lower == text.lower() else 0.8 if f" {query_lower}" in text.lower() else 0.5
-                results.append({**e, "score": score})
+                keyword_results[text] = score
+
+        # ── Merge scores ──
+        all_texts = set(list(vector_results.keys()) + list(keyword_results.keys()))
+        results = []
+        for e in store:
+            text = e["text"]
+            if text not in all_texts and not vector_results:
+                continue  # No vector available and no keyword match — skip
+            vec_score = vector_results.get(text, 0.0)
+            kw_score = keyword_results.get(text, 0.0)
+
+            if vec_score > 0 and kw_score > 0:
+                # Both matched — weighted hybrid
+                combined = vec_score * 0.6 + kw_score * 0.4
+            elif vec_score > 0:
+                combined = vec_score * 1.0  # Only vector
+            elif kw_score > 0:
+                combined = kw_score * 1.0  # Only keyword
+            else:
+                continue
+
+            results.append({**e, "score": round(combined, 4),
+                           "vec_score": round(vec_score, 4),
+                           "kw_score": round(kw_score, 4)})
+
         results.sort(key=lambda x: x["score"], reverse=True)
         return results
+
+    def semantic_search(self, query: str, target: str = "memory", top_k: int = 5) -> list[dict]:
+        """纯向量语义搜索 — 优先向量, 回退关键词.
+
+        Args:
+            query: 搜索查询
+            target: 'memory' or 'user'
+            top_k: 返回结果数
+
+        Returns:
+            [{text, metadata, score}] 按相关度降序
+        """
+        store = self._memory if target == "memory" else self._user
+        if not store:
+            return []
+
+        # ── Try vector search first ──
+        try:
+            vs = self._get_vector_store()
+            if vs and not vs.is_empty:
+                results = vs.search(query, top_k=top_k)
+                if results:
+                    # Merge with full entry metadata
+                    enriched = []
+                    for r in results:
+                        for e in store:
+                            if e.get("text", "") == r["text"]:
+                                enriched.append({**e, "score": r["score"]})
+                                break
+                        else:
+                            enriched.append(r)
+                    return enriched[:top_k]
+        except Exception as e:
+            logger.warning("Vector semantic search failed, falling back: %s", e)
+
+        # ── Fallback to keyword search ──
+        return self.search(query, target=target)[:top_k]
 
     # ═══ Prompt Injection ═══
 

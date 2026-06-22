@@ -82,6 +82,140 @@ class WorkflowPlan:
         return [s.action for s in self.steps if s.verify]
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Hierarchical Planning Data Classes (P1.2)
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass
+class PlanPhase:
+    """一个执行阶段，包含多个WorkflowStep，有依赖和失败策略。
+
+    Attributes:
+        name: 阶段名称，如 "research", "coding", "verify"
+        steps: 该阶段包含的WorkflowStep列表
+        depends_on: 前置phase名称列表，必须全部完成才能开始
+        on_failure: 失败策略 — "retry" | "skip" | "abort"
+        max_retries: 最多重试次数
+        status: 当前状态 — pending | running | done | failed | skipped
+        retry_count: 已重试次数
+        partial_output: 部分结果（失败时可能有的输出）
+        error_message: 失败时的错误信息
+    """
+    name: str
+    steps: list[WorkflowStep] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)
+    on_failure: str = "abort"  # retry | skip | abort
+    max_retries: int = 1
+    status: str = "pending"  # pending | running | done | failed | skipped
+    retry_count: int = 0
+    partial_output: Optional[str] = None
+    error_message: str = ""
+
+
+@dataclass
+class HierarchicalPlan:
+    """层次化执行计划，将任务分解为多个阶段，支持失败回溯。
+
+    Attributes:
+        goal: 任务目标
+        phases: 阶段列表
+        fallback_plan: 全局降级计划（可选）
+        current_phase: 当前阶段索引
+    """
+    goal: str
+    phases: list[PlanPhase] = field(default_factory=list)
+    fallback_plan: Optional[str] = None
+    current_phase: int = 0
+
+    def next_phase(self) -> Optional[PlanPhase]:
+        """获取下一个待执行的阶段（跳过已完成的）。
+
+        Returns:
+            下一个pending状态的PlanPhase，如果没有则返回None。
+        """
+        # 从头扫描，跳过 done/skipped，找到第一个 pending
+        for i, phase in enumerate(self.phases):
+            if phase.status == "pending":
+                # 检查依赖是否满足
+                if self._dependencies_satisfied(phase):
+                    self.current_phase = i
+                    return phase
+        return None
+
+    def _dependencies_satisfied(self, phase: PlanPhase) -> bool:
+        """检查phase的所有前置依赖是否已完成或跳过。"""
+        for dep_name in phase.depends_on:
+            dep = self._find_phase(dep_name)
+            if dep is None or dep.status not in ("done", "skipped"):
+                return False
+        return True
+
+    def _find_phase(self, name: str) -> Optional[PlanPhase]:
+        """按名称查找阶段。"""
+        for p in self.phases:
+            if p.name == name:
+                return p
+        return None
+
+    def mark_done(self, phase_name: str):
+        """标记阶段完成。"""
+        phase = self._find_phase(phase_name)
+        if phase:
+            phase.status = "done"
+
+    def mark_failed(self, phase_name: str, error: str = "",
+                    partial_output: str = "") -> str:
+        """标记阶段失败，并返回应采取的策略。
+
+        Args:
+            phase_name: 阶段名称
+            error: 错误信息
+            partial_output: 部分输出
+
+        Returns:
+            策略字符串: "retry" | "skip" | "abort"
+        """
+        phase = self._find_phase(phase_name)
+        if not phase:
+            return "abort"
+
+        phase.error_message = error
+        phase.partial_output = partial_output
+
+        if phase.on_failure == "retry" and phase.retry_count < phase.max_retries:
+            phase.retry_count += 1
+            phase.status = "pending"  # 重置为pending以重新执行
+            return "retry"
+
+        if phase.on_failure == "skip":
+            phase.status = "skipped"
+            return "skip"
+
+        # abort (default)
+        phase.status = "failed"
+        return "abort"
+
+    def all_phases_done(self) -> bool:
+        """检查所有阶段是否已完成（含跳过）。"""
+        return all(p.status in ("done", "skipped") for p in self.phases)
+
+    def get_partial_results(self) -> str:
+        """获取已完成阶段的部分结果汇总。"""
+        parts = [f"目标: {self.goal}"]
+        for p in self.phases:
+            if p.status == "done":
+                parts.append(f"  ✓ {p.name}: 完成")
+            elif p.status == "skipped":
+                parts.append(f"  ⊘ {p.name}: 跳过")
+            elif p.status == "failed":
+                parts.append(f"  ✗ {p.name}: 失败 — {p.error_message}")
+                if p.partial_output:
+                    parts.append(f"    部分输出: {p.partial_output[:200]}")
+            elif p.status == "pending":
+                parts.append(f"  ○ {p.name}: 未执行")
+        return "\n".join(parts)
+
+
 # Old dataclass kept for backward compatibility
 @dataclass
 class WorkflowNode:
@@ -585,6 +719,200 @@ Rules:
                 estimated_time_s=5.0,
                 reasoning="Fallback: LLM planning failed, using simple research",
             )
+
+    # ── P1.2 Hierarchical Planning ──────────────────────────
+
+    # 简单意图集合：单阶段模板
+    _SIMPLE_INTENTS: set[str] = {"COMMAND", "SEARCH", "GENERAL_CHAT",
+                                  "MEMORY", "SYSTEM", "VISION", "FILE",
+                                  "SOCIAL", "CODE_REVIEW"}
+
+    # 复杂意图集合：LLM多阶段分解
+    _COMPLEX_INTENTS: set[str] = {"CODING", "RESEARCH", "AUTOMATION", "CREATIVE"}
+
+    def plan_hierarchical(self, task: str, intent=None,
+                          capabilities=None) -> HierarchicalPlan:
+        """生成层次化执行计划。
+
+        根据意图复杂度决定：
+        - 简单任务 (COMMAND/SEARCH/GENERAL_CHAT等) → 1-phase（模板）
+        - 复杂任务 (CODING/RESEARCH等) → LLM生成多phase
+
+        Args:
+            task: 原始任务文本
+            intent: IntentResult（可选）
+            capabilities: Capability列表（可选）
+
+        Returns:
+            HierarchicalPlan
+        """
+        # 确定意图名
+        intent_name = "GENERAL_CHAT"
+        if intent is not None and hasattr(intent, 'intent'):
+            intent_name = intent.intent.upper()
+        elif intent is not None:
+            intent_name = str(intent).upper()
+
+        # 简单任务：单阶段模板
+        if intent_name in self._SIMPLE_INTENTS:
+            return self._simple_hierarchical_plan(task, intent_name, capabilities)
+        # 复杂任务：LLM多阶段
+        if intent_name in self._COMPLEX_INTENTS:
+            return self._llm_plan_hierarchical(task, intent_name)
+
+        # 未知意图：尝试keyword fallback后仍用单阶段
+        return self._simple_hierarchical_plan(task, intent_name, capabilities)
+
+    def _simple_hierarchical_plan(self, task: str, intent_name: str,
+                                   capabilities=None) -> HierarchicalPlan:
+        """简单任务 → 单个Phase包装现有的flat plan。"""
+        # 获取已有flat plan
+        if intent_name in INTENT_TEMPLATES:
+            template = INTENT_TEMPLATES[intent_name]
+        else:
+            template = DEFAULT_TEMPLATE
+
+        steps = self._build_steps(template["steps"], capabilities or [], task)
+
+        # 简单任务: 跳过audit的 → on_failure=skip; 走audit的 → on_failure=abort
+        skip_audit = template.get("skip_audit", False)
+        on_failure = "skip" if skip_audit else "abort"
+
+        phase = PlanPhase(
+            name=intent_name.lower(),
+            steps=steps,
+            depends_on=[],
+            on_failure=on_failure,
+            max_retries=1,
+        )
+
+        return HierarchicalPlan(
+            goal=task,
+            phases=[phase],
+            fallback_plan=None,
+        )
+
+    def _llm_plan_hierarchical(self, task: str, intent_name: str = "COMPLEX") -> HierarchicalPlan:
+        """LLM驱动：将复杂任务拆解为2-5个独立阶段，指定依赖和失败策略。"""
+        try:
+            from src.ceo.graph import _get_llm
+            llm = _get_llm("ceo")
+
+            prompt = f"""你是一个层次化工作流规划器。请将以下任务拆解为2-5个独立阶段。
+
+任务: {task}
+意图类型: {intent_name}
+
+每个阶段应有明确的依赖关系和失败策略。返回纯JSON格式:
+
+{{
+  "phases": [
+    {{
+      "name": "阶段名称",
+      "description": "该阶段做什么",
+      "steps": [
+        {{"name": "步骤名", "agent": "developer|researcher|devops|qa|marketer|ceo", "action": "action_name", "depends_on": [], "verify": false}}
+      ],
+      "depends_on": [],
+      "on_failure": "retry|skip|abort",
+      "max_retries": 1
+    }}
+  ],
+  "fallback_plan": null
+}}
+
+规则:
+1. 第一阶段通常没有依赖（depends_on: []）
+2. 后续阶段可依赖前面阶段的名字
+3. on_failure: "retry"用于关键步骤，"skip"用于非关键步骤，"abort"用于阻断性失败
+4. 最后一个阶段应该是验证阶段（verify步骤）
+5. 每个phase至少包含一个step
+6. 返回纯JSON，不要包含解释文字
+"""
+
+            response = llm.invoke(prompt)
+            raw = str(response.content)
+
+            # 提取JSON
+            if "```" in raw:
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            data = json.loads(raw.strip())
+
+            phases = []
+            for p_data in data.get("phases", []):
+                steps = []
+                for s in p_data.get("steps", []):
+                    agent = s.get("agent", "developer")
+                    action = s.get("action", "dispatch")
+                    # 使用action→agent映射来修正agent
+                    mapped_agent = _ACTION_AGENT_MAP.get(action, agent)
+                    steps.append(WorkflowStep(
+                        name=s.get("name", "Step"),
+                        agent=mapped_agent,
+                        action=action,
+                        params={"task": task},
+                        depends_on=list(s.get("depends_on", [])),
+                        verify=s.get("verify", False),
+                    ))
+
+                phase = PlanPhase(
+                    name=p_data.get("name", f"phase_{len(phases)}"),
+                    steps=steps,
+                    depends_on=list(p_data.get("depends_on", [])),
+                    on_failure=p_data.get("on_failure", "abort"),
+                    max_retries=int(p_data.get("max_retries", 1)),
+                )
+                phases.append(phase)
+
+            if not phases:
+                # Fallback: 单阶段
+                return self._simple_hierarchical_plan(task, intent_name)
+
+            return HierarchicalPlan(
+                goal=task,
+                phases=phases,
+                fallback_plan=data.get("fallback_plan"),
+            )
+
+        except Exception as e:
+            logger.warning("LLM hierarchical planning failed: %s", e)
+            # Fallback: 降级为简单单阶段计划
+            return self._simple_hierarchical_plan(task, intent_name)
+
+    def compat_hierarchical_plan(self, task: str,
+                                  task_type: str = "GENERAL") -> HierarchicalPlan:
+        """兼容旧的单层计划 → 包装为1-phase HierarchicalPlan。
+
+        用于向后兼容旧的task_type路由。
+
+        Args:
+            task: 任务文本
+            task_type: 旧版task_type字符串
+
+        Returns:
+            单phase的HierarchicalPlan
+        """
+        # 使用compat_plan_from_task_type获取flat plan
+        flat_plan = self.compat_plan_from_task_type(task_type, task=task)
+
+        # 包装为HierarchicalPlan
+        on_failure = "skip" if flat_plan.skip_audit else "abort"
+
+        phase = PlanPhase(
+            name=task_type.lower(),
+            steps=flat_plan.steps,
+            depends_on=[],
+            on_failure=on_failure,
+            max_retries=1,
+        )
+
+        return HierarchicalPlan(
+            goal=task,
+            phases=[phase],
+            fallback_plan=None,
+        )
 
     # ── compat_plan_from_task_type ────────────────────────────
 

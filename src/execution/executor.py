@@ -675,6 +675,41 @@ class ExecutionRouter:
                     )
                     result = await self.execute_tool(tool_name, params)
 
+                    # ═══ 代码闭环: run_python 后自动语法+测试检查 ═══
+                    code_loop_context = ""
+                    if tool_name == "run_python" and result.success:
+                        code = params.get("code", "")
+                        if code:
+                            try:
+                                from src.execution.code_loop import check_and_fix_code
+                                # 提取实际执行代码（跳过 safety_prelude）
+                                loop_code = code
+                                # 如果有 safety_prelude (signal.alarm), 提取后面的用户代码
+                                safety_marker = "signal.alarm(5)"
+                                if safety_marker in loop_code:
+                                    lines = loop_code.split("\n")
+                                    # 找到 safety_prelude 结束位置
+                                    cut = 0
+                                    for i, line in enumerate(lines):
+                                        if safety_marker in line:
+                                            cut = i + 2  # 跳过 signal.alarm(5) 和后面的换行
+                                            break
+                                    loop_code = "\n".join(lines[cut:])
+                                loop_result = await check_and_fix_code(
+                                    loop_code,
+                                    test_code="",
+                                    file_path=None,
+                                    max_iterations=3,
+                                )
+                                if loop_result.get("checked"):
+                                    code_loop_context = (
+                                        f"\n\n【代码质量闭环检查结果】\n{loop_result['context']}"
+                                    )
+                            except ImportError:
+                                logger.debug("code_loop module not available, skipping")
+                            except Exception as e:
+                                logger.debug("code_loop check failed: %s", e, exc_info=True)
+
                     if result.success:
                         compressed = self._rtk_compress(result.output, 500)
                         if tool_name == "web_fetch" and self._has_structured_time_series(result.output):
@@ -702,6 +737,7 @@ class ExecutionRouter:
                             feedback = (
                                 f"Tool '{tool_name}' OK.\n"
                                 f"{compressed}"
+                                f"{code_loop_context}"  # 注入代码闭环结果
                             )
                     else:
                         compressed = self._rtk_compress(result.output, 300)

@@ -48,6 +48,8 @@ class CEOState(TypedDict):
     arch_design: Optional[str]                 # Architect's design output
     workspace_id: Optional[str]                # Task workspace ID for context sharing
     task_type: Optional[str]                   # COMMAND_EXECUTION|SIMPLE_QUERY|RESEARCH|CODING|DOCUMENT|CREATIVE|GENERAL
+    hierarchical_plan: Optional[dict]           # P1.2: HierarchicalPlan serialized (goal, phases, current_phase)
+    phase_outputs: Annotated[list, operator.add]  # P1.2: accumulated outputs from each phase
 
 
 # ─── JSON Extraction Helper ───────────────────
@@ -1304,14 +1306,75 @@ Output format: Return your work result. Do NOT self-score."""
 
 @_safe_node("Department")
 async def execute_department_node(state: CEOState) -> dict:
-    """Node function."""
+    """Node function. P1.2: supports hierarchical phase execution."""
     from src.departments.agents import dispatch_to_department
-    
+
     department = state.get("department", "developer")
-    
+
+    # ── P1.2 Hierarchical Plan Management ──
+    hplan_data = state.get("hierarchical_plan")
+    current_phase = None
+    hplan = None
+
+    if hplan_data:
+        # 反序列化已有计划
+        from src.workflow.planner import HierarchicalPlan, PlanPhase, WorkflowStep
+        hplan = _deserialize_hierarchical_plan(hplan_data)
+        current_phase = hplan.next_phase()
+    else:
+        # 生成层次化计划
+        from src.workflow.planner import get_workflow_planner, HierarchicalPlan, PlanPhase
+        planner = get_workflow_planner()
+        task = state.get("user_request", "")
+        task_type = state.get("task_type", "GENERAL")
+        # 使用兼容接口生成层次化计划
+        hplan = planner.compat_hierarchical_plan(task, task_type)
+        current_phase = hplan.next_phase()
+
+    if current_phase is None:
+        # 所有phase已完成
+        if hplan and hplan.all_phases_done():
+            return {
+                "phase": "audit",
+                "execution_log": ["[DEPT] All phases complete"],
+                "final_output": _collect_phase_outputs(state),
+            }
+        # 没有可执行phase（依赖未满足等）
+        return {
+            "phase": "deliver",
+            "final_output": hplan.get_partial_results() if hplan else "No phases to execute",
+            "execution_log": ["[DEPT] No executable phase (dependencies unmet)"],
+        }
+
+    current_phase.status = "running"
+    phase_name = current_phase.name
+
+    # ── Determine department from phase steps ──
+    # Use the first step's agent as the primary department
+    if current_phase.steps:
+        primary_step = current_phase.steps[0]
+        effective_department = primary_step.agent
+        # Build task from phase steps
+        phase_task = f"[Phase: {phase_name}] {state.get('user_request', '')}"
+        for step in current_phase.steps:
+            if step.params.get("task"):
+                phase_task = step.params["task"]
+                break
+    else:
+        effective_department = department
+        phase_task = state.get("user_request", "")
+
     # Build rich context from PM and Architect
     context_parts = []
-    
+
+    # Add phase context
+    context_parts.append(
+        f"[Hierarchical Phase: {phase_name}]\n"
+        f"Goal: {hplan.goal if hplan else phase_task}\n"
+        f"Phase steps: {len(current_phase.steps)}\n"
+        f"On failure: {current_phase.on_failure} (retries: {current_phase.retry_count}/{current_phase.max_retries})"
+    )
+
     prd = state.get("prd") or {}  # prd may be None in TypedDict
     if prd:
         # Normalize features to strings (LLM may return dicts)
@@ -1333,15 +1396,15 @@ async def execute_department_node(state: CEOState) -> dict:
             f"Acceptance Criteria:\n{criteria_list}\n"
             f"Edge Cases: {edges_str}"
         )
-    
+
     arch_design = state.get("arch_design", "")
     if arch_design:
         context_parts.append(f"[Architect Design]\n{arch_design[:1500]}")
-    
+
     retry_feedback = state.get("retry_feedback", "")
     if retry_feedback:
         context_parts.insert(0, f"[RETRY - Fix These]\n{retry_feedback}")
-    
+
     # ── Workspace Context: load/create task workspace ──
     from src.workspace import TaskContext
     workspace_id = state.get("workspace_id")
@@ -1351,29 +1414,30 @@ async def execute_department_node(state: CEOState) -> dict:
     if not task_ctx:
         task_ctx = TaskContext()
         workspace_id = task_ctx.create(state.get("user_request", ""))
-        task_ctx.add_timeline(f"Dispatched to {department}")
+        task_ctx.add_timeline(f"Dispatched to {effective_department} (phase: {phase_name})")
     # Inject workspace context into agent prompt
     ws_context = task_ctx.get_context()
     if ws_context:
         context_parts.insert(0, f"[Workspace Context — Previous Findings]\n{ws_context}")
-    
+
     context = "\n\n".join(context_parts) if context_parts else ""
-    
+
     # ── Capability Discovery: determine what capabilities this task needs ──
     from src.capability import CapabilityPlanner
-    planner = CapabilityPlanner()
-    cap_plan = planner.analyze(state.get("user_request", ""))
+    cap_planner = CapabilityPlanner()
+    cap_plan = cap_planner.analyze(state.get("user_request", ""))
     dynamic_capabilities = cap_plan.capabilities
     # If the planned role differs from what triage selected, use the planner's choice
-    effective_department = cap_plan.role_hint if cap_plan.confidence > 0.5 else department
+    if cap_plan.confidence > 0.5 and cap_plan.role_hint:
+        effective_department = cap_plan.role_hint
     import logging as _log
     _log.getLogger("ai_company").debug("Capability plan: %s → role=%s caps=%s (confidence=%.2f)",
                  cap_plan.reasoning, effective_department, dynamic_capabilities, cap_plan.confidence)
-    
+
     # Save capabilities to workspace for skill learning
     if task_ctx and dynamic_capabilities:
         task_ctx.add_timeline(f"Capabilities: {', '.join(dynamic_capabilities)}")
-    
+
     # ── Skill Injection: inject learned workflow guidance ──
     from src.learning import skill_library as _sl
     skill_guidance = _sl.inject_context(state.get("user_request", ""))
@@ -1387,7 +1451,6 @@ async def execute_department_node(state: CEOState) -> dict:
     if task_type == "CODING":
         try:
             ck = get_checkpoint()
-            # 收集项目中已存在的文件作为备份候选
             project_files = _discover_project_files()
             if project_files:
                 checkpoint_name = ck.save(
@@ -1395,18 +1458,49 @@ async def execute_department_node(state: CEOState) -> dict:
                     project_files,
                 )
         except Exception:
-            checkpoint_name = None  # checkpoint 失败不应阻塞主流程
-    
+            checkpoint_name = None
+
     try:
         result = await dispatch_to_department(
             department=effective_department,
-            task=state.get("user_request", ""),
+            task=phase_task,
             context=context,
             dynamic_capabilities=dynamic_capabilities,
         )
     except Exception as e:
         import logging
         logging.getLogger("ai_company").exception("Department dispatch failed")
+
+        # ── P1.2: Apply hierarchical failure strategy ──
+        if hplan and current_phase:
+            strategy = hplan.mark_failed(
+                phase_name,
+                error=f"{type(e).__name__}: {e}",
+            )
+            if strategy == "retry":
+                return {
+                    "phase": "execute",
+                    "hierarchical_plan": _serialize_hierarchical_plan(hplan),
+                    "execution_log": [f"[DEPT-{phase_name}] RETRY #{current_phase.retry_count}: {e}"],
+                    "retry_feedback": f"Phase '{phase_name}' failed: {e}",
+                    "workspace_id": workspace_id,
+                }
+            elif strategy == "skip":
+                return {
+                    "phase": "execute",
+                    "hierarchical_plan": _serialize_hierarchical_plan(hplan),
+                    "execution_log": [f"[DEPT-{phase_name}] SKIPPED: {e}"],
+                    "phase_outputs": [f"[{phase_name}] SKIPPED: {str(e)[:200]}"],
+                    "workspace_id": workspace_id,
+                }
+            # abort
+            return {
+                "phase": "deliver",
+                "final_output": hplan.get_partial_results(),
+                "execution_log": [f"[DEPT-{phase_name}] ABORTED: {e}"],
+                "workspace_id": workspace_id,
+            }
+
         error_msg = f"Department '{department}' crashed: {type(e).__name__}"
         if checkpoint_name:
             error_msg += f"\n💡 可用 /checkpoint rollback {checkpoint_name} 恢复到执行前状态"
@@ -1416,21 +1510,55 @@ async def execute_department_node(state: CEOState) -> dict:
             "execution_log": [f"[DEPT-{department}] CRASHED: {e}"],
             "workspace_id": workspace_id,
         }
-    
+
     output = result.get("output", "")
     success = result.get("success", True)
     tool_calls = result.get("tool_calls", [])
-    
+
     # Save tool calls to workspace for skill learning
     if tool_calls and task_ctx:
         task_ctx.add_timeline(f"Tools: {', '.join(tc.get('tool', '?') for tc in tool_calls)}")
-    
+
     # Calculate tool failure count for evolution tracking
     failed_calls = sum(1 for tc in tool_calls if not tc.get("success", True))
     tools_used = list(dict.fromkeys(tc.get("tool", "?") for tc in tool_calls))
 
     if not success:
         error_msg = result.get("error", "Department failed")
+
+        # ── P1.2: Apply hierarchical failure strategy ──
+        if hplan and current_phase:
+            strategy = hplan.mark_failed(
+                phase_name,
+                error=error_msg,
+                partial_output=output[:500] if output else "",
+            )
+            if strategy == "retry":
+                if checkpoint_name:
+                    error_msg += f"\n💡 可用 /checkpoint rollback {checkpoint_name} 恢复到执行前状态"
+                return {
+                    "phase": "execute",
+                    "hierarchical_plan": _serialize_hierarchical_plan(hplan),
+                    "execution_log": [f"[DEPT-{phase_name}] RETRY #{current_phase.retry_count}: {error_msg[:100]}"],
+                    "retry_feedback": f"Phase '{phase_name}' failed: {error_msg}",
+                    "workspace_id": workspace_id,
+                }
+            elif strategy == "skip":
+                return {
+                    "phase": "execute",
+                    "hierarchical_plan": _serialize_hierarchical_plan(hplan),
+                    "execution_log": [f"[DEPT-{phase_name}] SKIPPED: {error_msg[:100]}"],
+                    "phase_outputs": [f"[{phase_name}] SKIPPED: {error_msg[:200]}"],
+                    "workspace_id": workspace_id,
+                }
+            # abort
+            return {
+                "phase": "deliver",
+                "final_output": hplan.get_partial_results(),
+                "execution_log": [f"[DEPT-{phase_name}] ABORTED: {error_msg[:100]}"],
+                "workspace_id": workspace_id,
+            }
+
         if checkpoint_name:
             error_msg += f"\n💡 可用 /checkpoint rollback {checkpoint_name} 恢复到执行前状态"
         return {
@@ -1439,7 +1567,27 @@ async def execute_department_node(state: CEOState) -> dict:
             "execution_log": [f"[DEPT-{department}] FAILED: {str(result.get('error', ''))[:100]}"],
             "workspace_id": workspace_id,
         }
-    
+
+    # ── P1.2: Phase succeeded ──
+    if hplan and current_phase:
+        hplan.mark_done(phase_name)
+        # Check if more phases remain
+        next_phase = hplan.next_phase()
+        next_phase_info = f" → next: {next_phase.name}" if next_phase else " → all done"
+
+        return {
+            "phase": "execute" if next_phase else "audit",
+            "hierarchical_plan": _serialize_hierarchical_plan(hplan),
+            "execution_log": [
+                f"[DEPT-{phase_name}] ✓ Complete (PM={'Y' if prd else 'N'} Arch={'Y' if arch_design else 'N'}){next_phase_info}",
+            ] + ([f"[DEPT-{phase_name}] Tool failures: {failed_calls}/{len(tool_calls)} calls"] if tool_calls else []),
+            "final_output": output,
+            "phase_outputs": [f"[{phase_name}] {output[:500]}"],
+            "workspace_id": workspace_id,
+            "task_type": classify_task(state.get("user_request", ""), effective_department),
+        }
+
+    # Fallback: original non-hierarchical flow
     return {
         "phase": "audit",
         "execution_log": [
@@ -1449,6 +1597,56 @@ async def execute_department_node(state: CEOState) -> dict:
         "workspace_id": workspace_id,
         "task_type": classify_task(state.get("user_request", ""), effective_department),
     }
+
+
+# ── P1.2 Helper Functions ──────────────────────
+
+def _serialize_hierarchical_plan(hplan) -> dict:
+    """序列化 HierarchicalPlan 为可存储在state中的dict。"""
+    from dataclasses import asdict
+    return asdict(hplan)
+
+
+def _deserialize_hierarchical_plan(data: dict):
+    """从dict反序列化 HierarchicalPlan。"""
+    from src.workflow.planner import HierarchicalPlan, PlanPhase, WorkflowStep
+    phases = []
+    for p_data in data.get("phases", []):
+        steps = []
+        for s_data in p_data.get("steps", []):
+            steps.append(WorkflowStep(
+                name=s_data.get("name", ""),
+                agent=s_data.get("agent", ""),
+                action=s_data.get("action", ""),
+                params=s_data.get("params", {}),
+                depends_on=s_data.get("depends_on", []),
+                verify=s_data.get("verify", False),
+            ))
+        phases.append(PlanPhase(
+            name=p_data.get("name", ""),
+            steps=steps,
+            depends_on=p_data.get("depends_on", []),
+            on_failure=p_data.get("on_failure", "abort"),
+            max_retries=p_data.get("max_retries", 1),
+            status=p_data.get("status", "pending"),
+            retry_count=p_data.get("retry_count", 0),
+            partial_output=p_data.get("partial_output"),
+            error_message=p_data.get("error_message", ""),
+        ))
+    return HierarchicalPlan(
+        goal=data.get("goal", ""),
+        phases=phases,
+        fallback_plan=data.get("fallback_plan"),
+        current_phase=data.get("current_phase", 0),
+    )
+
+
+def _collect_phase_outputs(state: dict) -> str:
+    """收集所有phase的输出。"""
+    outputs = state.get("phase_outputs", [])
+    if not outputs:
+        return state.get("final_output", "")
+    return "\n\n".join(str(o) for o in outputs)
 
 
 @_safe_node("Auditor")
@@ -2381,9 +2579,28 @@ def _inject_session_context(state: dict) -> None:
 
     # ── Hermes Memory (User Profile + Durable Facts) ──
     hermes_ctx = ""
+    user_request = state.get("user_request", "")
     try:
         from src.memory.hermes import hermes_memory
-        hermes_ctx = hermes_memory.get_full_context() or ""
+
+        # ── Smart memory injection: semantic search for top 5 relevant ──
+        if user_request.strip():
+            try:
+                relevant = hermes_memory.semantic_search(user_request, top_k=5)
+                if relevant:
+                    lines = ["## MEMORY (语义检索 Top 5)"]
+                    for e in relevant:
+                        score_pct = int(e.get("score", 0) * 100)
+                        lines.append(f"- [{score_pct}%] {e['text']}")
+                    hermes_ctx = "\n".join(lines)
+                    logger.debug("Semantic memory: injected %d relevant facts",
+                                 len(relevant))
+            except Exception:
+                pass
+
+        # Fallback: full context if semantic search returned nothing
+        if not hermes_ctx:
+            hermes_ctx = hermes_memory.get_full_context() or ""
     except Exception:
         pass
 
