@@ -14,6 +14,7 @@ import urllib.request
 # ═══ P0 Module Integration ═══
 from src.intent import classify_task  # V5 intent router (replaces local classify_task)
 from src.verification import verify_aggregate as _v5_verify_aggregate
+from src.checkpoint import get_checkpoint  # P1: checkpoint 错误恢复
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -1045,6 +1046,34 @@ def _classify_task_type(state: CEOState) -> str:
     )
 
 
+def _safe_slug(text: str, max_len: int = 40) -> str:
+    """将文本转成安全的短标识符(用于 checkpoint 名称)。"""
+    import re
+    slug = re.sub(r'[^\w\u4e00-\u9fff]', '-', text.strip())
+    slug = re.sub(r'-+', '-', slug)
+    slug = slug.strip('-')
+    if len(slug) > max_len:
+        slug = slug[:max_len]
+    return slug or "task"
+
+
+def _discover_project_files() -> list[str]:
+    """发现项目中已存在的可跟踪文件(仅 Python 源文件)。
+
+    扫描项目根目录下的 src/ 和 tests/ 目录。
+    返回相对路径列表。
+    """
+    import glob as _glob
+    project_root = os.path.join(os.path.dirname(__file__), "..", "..")
+    root = os.path.abspath(project_root)
+    files = []
+    for pattern in ("src/**/*.py", "tests/**/*.py"):
+        for fpath in _glob.glob(pattern, root_dir=root, recursive=True):
+            if "__pycache__" not in fpath:
+                files.append(fpath)
+    return sorted(files)[:200]  # 限制最多 200 个文件
+
+
 # ─── PM Node ──────────────────────────────────────
 
 def _get_fallback_criteria(department: str, task_type: str) -> str:
@@ -1351,6 +1380,22 @@ async def execute_department_node(state: CEOState) -> dict:
     if skill_guidance:
         context_parts.insert(0, skill_guidance)
         context = "\n\n".join(context_parts) if context_parts else ""
+
+    # ── P1 Checkpoint: CODING 任务执行前自动保存状态 ──
+    task_type = _classify_task_type(state)
+    checkpoint_name = None
+    if task_type == "CODING":
+        try:
+            ck = get_checkpoint()
+            # 收集项目中已存在的文件作为备份候选
+            project_files = _discover_project_files()
+            if project_files:
+                checkpoint_name = ck.save(
+                    f"auto-coding-{_safe_slug(state.get('user_request', 'task'))}",
+                    project_files,
+                )
+        except Exception:
+            checkpoint_name = None  # checkpoint 失败不应阻塞主流程
     
     try:
         result = await dispatch_to_department(
@@ -1362,9 +1407,12 @@ async def execute_department_node(state: CEOState) -> dict:
     except Exception as e:
         import logging
         logging.getLogger("ai_company").exception("Department dispatch failed")
+        error_msg = f"Department '{department}' crashed: {type(e).__name__}"
+        if checkpoint_name:
+            error_msg += f"\n💡 可用 /checkpoint rollback {checkpoint_name} 恢复到执行前状态"
         return {
             "phase": "deliver",
-            "final_output": f"Department '{department}' crashed: {type(e).__name__}",
+            "final_output": error_msg,
             "execution_log": [f"[DEPT-{department}] CRASHED: {e}"],
             "workspace_id": workspace_id,
         }
@@ -1382,9 +1430,12 @@ async def execute_department_node(state: CEOState) -> dict:
     tools_used = list(dict.fromkeys(tc.get("tool", "?") for tc in tool_calls))
 
     if not success:
+        error_msg = result.get("error", "Department failed")
+        if checkpoint_name:
+            error_msg += f"\n💡 可用 /checkpoint rollback {checkpoint_name} 恢复到执行前状态"
         return {
             "phase": "deliver",
-            "final_output": result.get("error", "Department failed"),
+            "final_output": error_msg,
             "execution_log": [f"[DEPT-{department}] FAILED: {str(result.get('error', ''))[:100]}"],
             "workspace_id": workspace_id,
         }
@@ -1503,10 +1554,39 @@ async def verify_aggregate_node(state: CEOState) -> dict:
     def _is_fail(output: str, exec_log: list) -> bool:
         """Check if output indicates a real failure (not just non-empty)."""
         patterns = [
+            # System errors / crashes
             r"Max iterations exhausted", r"CRASHED", r"FAILED",
+            # Chinese stale/evasive answers
             r"\u65e0\u6cd5\u83b7\u53d6\u5b9e\u65f6", r"\u6839\u636e\u5df2\u77e5\u6570\u636e",
+            # English stale/evasive answers
             r"cannot\s+(?:access|fetch|retrieve)",
-            r"NameError", r"TypeError", r"KeyError",
+            # Python runtime errors
+            r"NameError", r"TypeError", r"KeyError", r"ValueError",
+            r"AttributeError", r"ImportError", r"ModuleNotFoundError",
+            r"SyntaxError", r"IndentationError", r"IndexError",
+            r"FileNotFoundError", r"PermissionError", r"OSError",
+            # LLM output failures
+            r"Internal tool call leaked", r"Output format error",
+            r"No valid JSON", r"unable to (?:parse|process|generate)",
+            # Empty / near-empty outputs
+            r"^\s*$", r"^\s*[{}\[\]]\s*$",
+            # Chinese compliance boilerplate (LLM ack instead of answer)
+            r"收到.*我会严格", r"我会.*遵守.*格式", r"有什么需要我做的",
+            r"好的.*我会.*JSON", r"明白了.*我会",
+            r"了解.*马上.*格式", r"按照.*格式.*回复",
+            r"遵守.*JSON.*格式", r"收到[，,。!\s]*$",
+            # Network / API errors
+            r"(?:网络|接口|API|HTTP|连接).*(?:错误|超时|失败|异常)",
+            r"(?:timeout|connection\s+(?:error|refused|reset)|500|503|429)",
+            # Tool execution failures
+            r"(?:tool|工具).*(?:fail|失败|error|错误|crash)",
+            r"Maximum retries exceeded", r"Execution failed",
+            # Empty search results
+            r"(?:no|zero|0)\s+results?\s+(?:found|returned)",
+            r"(?:未找到|没有找到|无).*(?:结果|数据|信息)",
+            # Hallucination indicators
+            r"I don't have (?:access to|the ability to)",
+            r"As an AI(?:,| language model)? I (?:cannot|don't|can't)",
         ]
         combined = output + " " + " ".join(str(x) for x in exec_log)
         return any(re.search(p, combined, re.IGNORECASE) for p in patterns)
@@ -1801,6 +1881,21 @@ r"^收到[，,。!\s]*$",
         "suggestions": score_card.get("suggestions", []),
     }
     
+    # ── Token + memory stats for aggregate report ──
+    try:
+        from src.utils.token_tracker import get_token_tracker
+        tracker = get_token_tracker()
+        token_stats = tracker.get_stats()
+        token_line = ""
+        if token_stats.get("total_calls", 0) > 0:
+            token_line = (
+                f" | Tokens: {token_stats['total_tokens']:,} total "
+                f"({token_stats['total_calls']} calls, "
+                f"~${token_stats.get('estimated_cost_usd', 0):.4f})"
+            )
+    except Exception:
+        token_line = ""
+    
     agent_state = get_agent_state("ceo")
     agent_state.log_decision(
         f"Auditor={auditor_score} + PMO={pmo_score} -> Final={final_score}/{config.gate_final_score} -> {decision}",
@@ -1817,7 +1912,7 @@ r"^收到[，,。!\s]*$",
         "retry_feedback": retry_feedback,
         **({"final_output": fail_output} if decision == "FAIL" else {}),
         "execution_log": [
-            f"[CEO-AGGREGATE] Auditor({auditor_score}) + PMO({pmo_score}) -> Final={final_score}/{config.gate_final_score} -> {decision}",
+            f"[CEO-AGGREGATE] Auditor({auditor_score}) + PMO({pmo_score}) -> Final={final_score}/{config.gate_final_score} -> {decision}{token_line}",
         ] + (
             [f"[CEO-AGGREGATE] ❌ FAIL after {max_retries} retries — tools unavailable or task too complex"]
             if decision == "FAIL" else []
@@ -2016,6 +2111,52 @@ async def deliver_node(state: CEOState) -> dict:
         timing_report = timer.get_summary()
         if timing_report:
             dept_output = str(dept_output) + timing_report
+    except Exception:
+        pass
+
+    # ── Token usage stats ──
+    try:
+        from src.utils.token_tracker import get_token_tracker
+        token_tracker = get_token_tracker()
+        token_summary = token_tracker.get_summary_text()
+        if token_summary:
+            dept_output = str(dept_output) + "\n\n" + token_summary
+        # Also log per-request token stats
+        stats = token_tracker.get_stats()
+        if stats.get("total_calls", 0) > 0:
+            import logging
+            logger = logging.getLogger("ai_company.token")
+            logger.info(
+                "Request token report: %d calls, %d total tokens, ~$%.4f, "
+                "prompt=%d completion=%d",
+                stats["total_calls"],
+                stats["total_tokens"],
+                stats.get("estimated_cost_usd", 0),
+                stats["total_prompt_tokens"],
+                stats["total_completion_tokens"],
+            )
+    except Exception:
+        pass
+
+    # ── Memory usage report ──
+    try:
+        from src.utils.token_budget import TokenBudget
+        # Estimate memory context size for this request
+        final_output = str(state.get("final_output", ""))
+        exec_log_str = " ".join(str(x) for x in state.get("execution_log", []))
+        messages_str = " ".join(
+            str(m.content) if hasattr(m, "content") else str(m)
+            for m in state.get("messages", [])
+        )
+        total_chars = len(final_output) + len(exec_log_str) + len(messages_str)
+        budget_check = TokenBudget(max_total=16000)
+        est_tokens = budget_check.estimate(messages_str)
+        memory_line = (
+            f"\n\n📊 Memory: ~{total_chars} chars output+log+msgs, "
+            f"est. ~{est_tokens} prompt tokens "
+            f"({min(100, round(est_tokens/16000*100))}% of 16K budget)"
+        )
+        dept_output = str(dept_output) + memory_line
     except Exception:
         pass
     
@@ -2231,43 +2372,100 @@ def _inject_session_context(state: dict) -> None:
     1. USER PROFILE — compact declarative facts
     2. MEMORY — durable facts with [N%] budget indicator
     3. Recent conversation turns (last 5, compact)
-    """
-    context_parts = []
     
+    Uses TokenBudget to prevent context overflow, and Compressor
+    to summarise long conversation histories.
+    """
+    import logging
+    logger = logging.getLogger("ai_company.memory")
+
     # ── Hermes Memory (User Profile + Durable Facts) ──
+    hermes_ctx = ""
     try:
         from src.memory.hermes import hermes_memory
-        hermes_ctx = hermes_memory.get_full_context()
-        if hermes_ctx.strip():
-            context_parts.append(hermes_ctx)
+        hermes_ctx = hermes_memory.get_full_context() or ""
     except Exception:
         pass
-    
+
     # ── Recent conversation turns (compact, last 5) ──
+    history_text = ""
+    history_raw = []
     try:
         from src.session import get_session_manager
         from src.session.memory import get_session_memory
         mgr = get_session_manager()
         if mgr.current:
             mem = get_session_memory(mgr.current.id)
-            history = mem.get_recent_conversations(5)
-            if history:
+            history_raw = mem.get_recent_conversations(5)
+            if history_raw:
                 turns = []
-                for t in history:
+                for t in history_raw:
                     q = t.get("user", "")[:150]
                     a = t.get("assistant", "")[:150]
                     if q or a:
                         turns.append(f"Q: {q}\nA: {a}")
                 if turns:
-                    context_parts.append("## 最近对话 (Recent Conversation)\n" + "\n---\n".join(turns))
+                    history_text = "## 最近对话 (Recent Conversation)\n" + "\n---\n".join(turns)
     except Exception:
         pass
-    
-    if context_parts:
-        full_context = "\n\n".join(context_parts)
-        from langchain_core.messages import SystemMessage
-        state["messages"].insert(0, SystemMessage(content=full_context))
-        state["execution_log"] = [f"[MEMORY] Loaded context ({sum(len(p) for p in context_parts)} chars)"]
+
+    # ═══ Token Budget Control ═══
+    # If hermes_ctx + history_text exceeds budget, trim intelligently
+    if hermes_ctx or history_text:
+        try:
+            from src.utils.token_budget import budget_context, TokenBudget
+            budget_report = None
+
+            # ── Smart compression: if history > 1000 chars and budget tight ──
+            if history_raw and len(history_text) > 1000:
+                budget = TokenBudget(max_prompt=12000)
+                profile_tokens = budget.estimate(hermes_ctx)
+                hist_tokens = budget.estimate(history_text)
+                if (profile_tokens + hist_tokens) > budget.max_prompt * 0.6:
+                    # Budget is tight — compress old turns
+                    try:
+                        from src.utils.compressor import Compressor
+                        compressor = Compressor(keep_recent=3, trigger_chars=1000)
+                        history_text = compressor.compress_conversation(
+                            history_raw, max_tokens=min(3000, budget.remaining())
+                        )
+                        logger.debug("Compressed conversation history (budget tight)")
+                    except Exception:
+                        pass
+
+            # Apply token budget
+            final_context, budget_report = budget_context(
+                hermes_ctx, history_text, max_prompt=12000
+            )
+
+            if final_context.strip():
+                from langchain_core.messages import SystemMessage
+                state["messages"].insert(0, SystemMessage(content=final_context))
+
+                mem_chars = len(final_context)
+                usage_pct = budget_report.get("usage_pct", 0) if budget_report else 0
+                status = budget_report.get("status", "OK") if budget_report else "OK"
+                state["execution_log"] = [
+                    f"[MEMORY] Context loaded: {mem_chars} chars, "
+                    f"budget={usage_pct}% ({status})"
+                ]
+                if status != "OK":
+                    logger.warning("Token budget %s: %.1f%% used (%d/%d)",
+                                   status, usage_pct,
+                                   budget_report.get("consumed_prompt", 0),
+                                   budget_report.get("max_prompt", 12000))
+        except ImportError:
+            # Fallback: original behavior without budget control
+            context_parts = []
+            if hermes_ctx.strip():
+                context_parts.append(hermes_ctx)
+            if history_text.strip():
+                context_parts.append(history_text)
+            if context_parts:
+                full_context = "\n\n".join(context_parts)
+                from langchain_core.messages import SystemMessage
+                state["messages"].insert(0, SystemMessage(content=full_context))
+                state["execution_log"] = [f"[MEMORY] Loaded context ({sum(len(p) for p in context_parts)} chars)"]
 
 
 async def run_ceo(user_message: str) -> CEOState:

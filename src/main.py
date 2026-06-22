@@ -206,7 +206,8 @@ async def run_cli():
                      "/timer":"计时开关","/audit":"审查开关","/optimize":"自动优化","/improve":"进化报告",
                      "/mood":"今日心情","/whois":"联系人画像","/remember":"记住事实","/session":"会话管理",
                      "/vision":"视觉工具","/clear":"清屏","/quit":"退出","/fix":"自我修复",
-                     "/diag":"系统诊断","/sessions":"会话列表","/global":"全局记忆"}
+                     "/diag":"系统诊断","/sessions":"会话列表","/global":"全局记忆",
+                     "/checkpoint":"checkpoint管理"}
                 def get_completions(self, document, complete_event):
                     t = document.text_before_cursor
                     if not t.startswith("/"):
@@ -396,6 +397,9 @@ async def run_cli():
         if user_input.lower() in ("/diag", "/diagnose"):
             await _cmd_diag(console)
             continue
+        if user_input.lower().startswith("/checkpoint"):
+            _cmd_checkpoint(console, user_input)
+            continue
 
         console.print()
         t_start = time.time()
@@ -482,6 +486,7 @@ def _show_help(console):
     table.add_row("/remember <人> <事>", "记住关于联系人的事实")
     table.add_row("/session [new/switch]", "会话管理")
     table.add_row("/clear, /cls       ", "清屏")
+    table.add_row("/checkpoint save/rollback/list/clean", "checkpoint错误恢复")
     table.add_row("/quit, /q          ", "退出")
     console.print(table)
     console.print("\n[dim]💡 直接输入问题即可，不需要加任何前缀[/dim]")
@@ -568,6 +573,87 @@ async def _cmd_diag(console):
             console.print(f"     {u}")
 
     console.print()
+
+
+def _cmd_checkpoint(console, user_input: str):
+    """Checkpoint 管理命令。
+
+    用法:
+      /checkpoint save <name>    保存当前状态
+      /checkpoint rollback <id>  回滚到指定 checkpoint
+      /checkpoint list           列出所有 checkpoint
+      /checkpoint clean          清理旧 checkpoint(保留最近10个)
+    """
+    from src.checkpoint import get_checkpoint
+
+    parts = user_input.strip().split(maxsplit=2)
+    subcmd = parts[1].lower() if len(parts) >= 2 else "list"
+
+    ck = get_checkpoint()
+
+    if subcmd == "list":
+        items = ck.list()
+        if not items:
+            console.print("  [dim]没有 checkpoint 记录。执行 CODING 任务时会自动创建。[/dim]")
+            return
+        from rich.table import Table
+        table = Table(title="📦 Checkpoints")
+        table.add_column("ID", style="cyan")
+        table.add_column("名称", style="green")
+        table.add_column("创建时间", style="dim")
+        table.add_column("文件数")
+        for item in items:
+            table.add_row(
+                item["id"],
+                item.get("name", "?"),
+                item.get("created", "?")[:19],
+                str(len(item.get("files", []))),
+            )
+        console.print(table)
+        console.print(f"  [dim]共 {len(items)} 个 checkpoint[/dim]")
+
+    elif subcmd == "save":
+        if len(parts) < 3:
+            console.print("  [red]用法: /checkpoint save <名称>[/red]")
+            return
+        name = parts[2].strip()
+        try:
+            from src.ceo.graph import _discover_project_files
+            files = _discover_project_files()
+            ck_id = ck.save(name, files)
+            console.print(f"  [green]✅ Checkpoint 已保存: {ck_id}[/green]")
+            console.print(f"  [dim]备份了 {len(files)} 个文件[/dim]")
+        except Exception as e:
+            console.print(f"  [red]❌ 保存失败: {e}[/red]")
+
+    elif subcmd == "rollback":
+        if len(parts) < 3:
+            console.print("  [red]用法: /checkpoint rollback <checkpoint-id>[/red]")
+            return
+        ck_id = parts[2].strip()
+        meta = ck.get(ck_id)
+        if not meta:
+            console.print(f"  [red]❌ Checkpoint 不存在: {ck_id}[/red]")
+            console.print("  [dim]使用 /checkpoint list 查看可用 checkpoint[/dim]")
+            return
+        success = ck.rollback(ck_id)
+        if success:
+            console.print(f"  [green]✅ 已回滚到: {ck_id}[/green]")
+            files = [f["path"] for f in meta.get("files", [])]
+            console.print(f"  [dim]恢复了 {len(files)} 个文件[/dim]")
+        else:
+            console.print(f"  [red]❌ 回滚失败[/red]")
+
+    elif subcmd in ("clean", "cleanup"):
+        removed = ck.cleanup(keep_last=10)
+        if removed > 0:
+            console.print(f"  [green]✅ 清理了 {removed} 个旧 checkpoint[/green]")
+        else:
+            console.print("  [dim]没有需要清理的 checkpoint(已有 ≤10 个)[/dim]")
+
+    else:
+        console.print(f"  [red]未知子命令: {subcmd}[/red]")
+        console.print("  [dim]可用: save / rollback / list / clean[/dim]")
 
 
 def _show_status(console, plat, roles, store):
