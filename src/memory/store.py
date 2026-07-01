@@ -793,7 +793,14 @@ def clear_pending(user_id: str):
 # ═══════════════════════════════════════════════════
 
 episode_memory = EpisodeMemory()
-chroma_store = ChromaVectorStore()
+_chroma_store: ChromaVectorStore | None = None
+
+def get_chroma_store() -> ChromaVectorStore:
+    """Lazy singleton — avoids loading sentence-transformers on import."""
+    global _chroma_store
+    if _chroma_store is None:
+        _chroma_store = ChromaVectorStore()
+    return _chroma_store
 agent_states: dict[str, AgentState] = {}
 
 
@@ -810,7 +817,7 @@ async def sync_episode_to_chroma(episode: dict):
     content = episode.get("content", "")
     if len(content) < 10:
         return
-    await chroma_store.add(
+    await get_chroma_store().add(
         text=content,
         metadata={
             "role": episode.get("role", "unknown"),
@@ -831,5 +838,5 @@ def get_memory_health() -> dict:
             }
             for aid, s in agent_states.items()
         },
-        "chroma_available": chroma_store.is_available(),
+        "chroma_available": get_chroma_store().is_available(),
     }
