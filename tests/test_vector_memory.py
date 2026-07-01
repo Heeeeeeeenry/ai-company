@@ -225,40 +225,30 @@ def test_search_special_chars(populated_store):
         assert any("85%" in t for t in texts)
 
 
-# ═══ Integration: HermesMemory ═══
+# ═══ Integration: EngramBackend ═══
 
 
-def test_hermes_semantic_search():
-    """Test semantic_search through HermesMemory."""
-    from src.memory.hermes import HermesMemory
+def test_engram_semantic_search():
+    """Test semantic_search through EngramBackend."""
+    from src.memory.hermes import hermes_memory
 
-    hm = HermesMemory()
-    try:
-        # Add a test entry
-        hm.add("测试向量搜索: 这是一条关于Python编程的记忆", category="test")
+    hm = hermes_memory
+    hm.add("测试向量搜索: 这是一条关于Python编程的记忆", category="test")
 
-        # Semantic search
-        results = hm.semantic_search("编程语言", top_k=3)
-        assert isinstance(results, list)
+    results = hm.semantic_search("编程语言", top_k=3)
+    assert isinstance(results, list)
 
-        # Clean up
-        hm.remove("测试向量搜索")
-    except Exception as e:
-        pytest.skip(f"HermesMemory integration failed: {e}")
+    hm.remove("测试向量搜索")
 
 
-def test_hermes_search_hybrid():
-    """Test that hermes search returns hybrid results with score fields."""
-    from src.memory.hermes import HermesMemory
+def test_engram_search():
+    """Test that engram search returns results with score fields."""
+    from src.memory.hermes import hermes_memory
 
-    hm = HermesMemory()
-    try:
-        hm.add("测试混合搜索: Python异步编程最佳实践", category="test")
+    hm = hermes_memory
+    hm.add("测试搜索: Python异步编程最佳实践", category="test")
 
-        results = hm.search("Python")
-        assert isinstance(results, list)
+    results = hm.search("Python")
+    assert isinstance(results, list)
 
-        # Clean up
-        hm.remove("测试混合搜索")
-    except Exception as e:
-        pytest.skip(f"HermesMemory hybrid search failed: {e}")
+    hm.remove("测试搜索")

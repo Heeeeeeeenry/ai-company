@@ -2799,9 +2799,17 @@ def _inject_session_context(state: dict) -> None:
             except Exception:
                 pass
 
-        # Fallback: full context if semantic search returned nothing
+        # Fallback: only inject full context if query likely needs memory
         if not hermes_ctx:
-            hermes_ctx = hermes_memory.get_full_context() or ""
+            try:
+                if hermes_memory.store.should_inject(user_request):
+                    hermes_ctx = hermes_memory.get_full_context() or ""
+                    logger.debug("Full memory injected for relevant query")
+                else:
+                    hermes_ctx = ""
+                    logger.debug("Skipped memory injection for non-relevant query")
+            except Exception:
+                hermes_ctx = ""
     except Exception:
         pass
 

@@ -15,3 +15,6 @@ tenacity>=8.0
 jieba>=0.42
 gnureadline>=8.0  # CJK multi-byte backspace fix on macOS
 Pillow>=10.0
+
+# Memory (engram-router — evidence-based SQLite memory)
+engram-router @ file:///Users/v_liheng02/work/test_code/for_test/engram-router
