@@ -417,6 +417,10 @@ async def run_cli():
             continue
         total_elapsed = time.time() - t_start
 
+        if result is None:
+            console.print("[red]Internal error: graph returned None[/red]")
+            continue
+
         phase = result.get("phase", "?")
         score = result.get("score_card", {}).get("final_score",
                 result.get("score_card", {}).get("score", "—"))
