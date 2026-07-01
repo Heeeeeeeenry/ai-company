@@ -131,6 +131,14 @@ class SessionManager:
         import shutil
         shutil.rmtree(self._session_dir(target.id), ignore_errors=True)
         del self._sessions[target.id]
+
+        # Notify memory system to clean up cached backend (zombie prevention)
+        try:
+            from src.memory.hermes import hermes_memory
+            hermes_memory.on_session_deleted(target.id)
+        except ImportError:
+            pass
+
         return True
     
     def list_all(self) -> list[Session]:

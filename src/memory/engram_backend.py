@@ -15,62 +15,93 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger("ai_company.engram_backend")
 
 DATA_DIR = os.path.expanduser("~/.ai-company")
 DB_PATH = os.path.join(DATA_DIR, "engram_memory.db")
 
+# ── Module-level shared MemoryStore (single SQLite connection) ──
+_shared_store: Any = None
+_store_lock = Lock()
+
+# session_id must not contain ':' (would break namespace: session:id:target)
+_SESSION_ID_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def _get_shared_store() -> Any:
+    """Lazy-init the module-level MemoryStore singleton.
+
+    All EngramBackend instances (global + per-session) share ONE
+    sqlite3.Connection, eliminating the connection-leak problem.
+    Data isolation is handled by namespace, not by connection.
+    """
+    global _shared_store
+    if _shared_store is None:
+        with _store_lock:
+            if _shared_store is None:
+                from engram_router.store import MemoryStore
+                os.makedirs(DATA_DIR, exist_ok=True)
+                _shared_store = MemoryStore(path=Path(DB_PATH))
+                logger.info("Shared MemoryStore initialized: %s", DB_PATH)
+    return _shared_store
+
 
 class EngramBackend:
     """EngramRouter-backed memory with HermesMemory-compatible API.
 
-    Uses two namespaces:
-      - "memory" → declarative facts, environment, tools, lessons
-      - "user"   → user profile, preferences, habits
+    Supports session isolation: each session gets its own namespace prefix
+    so memories added in session A are invisible in session B.
+
+    Namespace scheme:
+      - Global (session_id=None)  → "memory" / "user"
+      - Session (session_id="abc") → "session:abc:memory" / "session:abc:user"
     """
 
-    # ── Class-level entry registry (in-memory index for list/stats) ──
-    # We maintain a lightweight index because engram-router's recall()
-    # is search-based and doesn't support "list all".
-    _instance: EngramBackend | None = None
+    def __init__(self, session_id: str | None = None):
+        # Validate session_id to prevent namespace collision
+        if session_id is not None and not _SESSION_ID_RE.match(session_id):
+            raise ValueError(
+                f"Invalid session_id: {session_id!r}. "
+                f"Must match {_SESSION_ID_RE.pattern}"
+            )
 
-    def __init__(self):
-        self._store: Any = None  # MemoryStore — init lazily
+        self.session_id: str | None = session_id
+        self._store: Any = _get_shared_store()  # Shared singleton — single SQLite conn
         self._lock = Lock()
         self._entries: dict[str, list[dict]] = {"memory": [], "user": []}
-        self._init_store()
+        self._by_id: dict[str, dict] = {}  # memory_id → entry (O(1) lookup)
+        self._seed_defaults()
+        self._load_entries()
+
+    # ── Namespace helpers ──
+
+    def _ns(self, target: str) -> str:
+        """Resolve engram-router namespace with session prefix."""
+        if self.session_id is not None:
+            return f"session:{self.session_id}:{target}"
+        return target
 
     # ═══ Store Init ═══
 
-    def _init_store(self):
-        """Lazy-init the engram-router MemoryStore."""
-        try:
-            from engram_router.store import MemoryStore
-            os.makedirs(DATA_DIR, exist_ok=True)
-            self._store = MemoryStore(path=Path(DB_PATH))
-            self._seed_defaults()
-            self._load_entries()
-            logger.info("EngramBackend initialized: %s", DB_PATH)
-        except ImportError:
-            logger.error(
-                "engram-router not installed. Install with: "
-                "pip install -e /path/to/engram-router"
-            )
-            raise
-        except Exception as exc:
-            logger.error("EngramBackend init failed: %s", exc)
-            raise
-
     def _seed_defaults(self):
-        """Seed default memory entries on first creation (empty DB)."""
-        # Check if DB already has entries
-        stats = self.store.conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE namespace = 'memory'"
+        """Seed default memory entries on first creation (empty DB).
+
+        Only runs for global memory (session_id=None) — per-session
+        backends start empty and learn organically.
+        """
+        if self.session_id is not None:
+            return  # Per-session backends don't get seeded
+
+        # Check if DB already has entries for this namespace
+        ns = self._ns("memory")
+        stats = self._store.conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE namespace = ?", (ns,)
         ).fetchone()
         if stats and stats[0] > 0:
             return  # Already has entries
@@ -101,32 +132,30 @@ class EngramBackend:
 
     def _load_entries(self):
         """Hydrate in-memory entry registry from SQLite DB."""
-        from engram_router.store import MemoryRecord
         try:
             for target in ("memory", "user"):
-                rows = self.store.conn.execute(
+                ns = self._ns(target)
+                rows = self._store.conn.execute(
                     "SELECT id, raw_text, metadata FROM memories WHERE namespace = ?",
-                    (target,),
+                    (ns,),
                 ).fetchall()
                 entries = []
                 for row in rows:
                     meta = json.loads(row["metadata"]) if row["metadata"] else {}
-                    entries.append({
+                    entry = {
                         "text": row["raw_text"],
                         "memory_id": row["id"],
                         "category": meta.get("category", ""),
                         "created_at": meta.get("created_at", ""),
                         "access_count": meta.get("access_count", 0),
-                    })
+                    }
+                    entries.append(entry)
+                    self._by_id[row["id"]] = entry  # Build O(1) index
                 self._entries[target] = entries
-        except Exception:
-            pass  # DB may be empty from _seed_defaults
-
-    @property
-    def store(self):
-        if self._store is None:
-            self._init_store()
-        return self._store
+        except Exception as exc:
+            logger.warning(
+                "_load_entries skipped (first run or DB error): %s", exc
+            )
 
     # ═══ Migration ───
 
@@ -162,10 +191,25 @@ class EngramBackend:
             logger.info("Migrated %d entries from %s", imported, json_path)
         return imported
 
+    # ═══ Lifecycle ═══
+
+    def close(self):
+        """Release resources. Safe to call multiple times.
+
+        Does NOT close the shared MemoryStore — that's module-level
+        and shared across all instances. Only clears local state.
+        """
+        with self._lock:
+            self._entries = {"memory": [], "user": []}
+            self._by_id = {}
+
     # ═══ Internal helpers ───
 
     def _add_internal(self, text: str, target: str, category: str = "") -> dict:
-        """Core add logic — saves to store + updates entry registry."""
+        """Core add logic — saves to store + updates entry registry.
+
+        Caller MUST hold self._lock (or be in single-threaded init path).
+        """
         now = datetime.now().isoformat()
         entry = {
             "text": text,
@@ -177,20 +221,20 @@ class EngramBackend:
 
         # Save to engram-router
         try:
-            memory_id = self.store.save(
+            memory_id = self._store.save(
                 text,
                 source="hermes",
                 metadata={"target": target, "category": category},
-                namespace=target,
+                namespace=self._ns(target),
             )
             entry["memory_id"] = memory_id
         except Exception as exc:
             logger.error("Engram save failed: %s", exc)
             raise
 
-        # Update registry
-        with self._lock:
-            self._entries[target].append(entry)
+        # Update registries (caller holds lock)
+        self._entries[target].append(entry)
+        self._by_id[memory_id] = entry
 
         return entry
 
@@ -200,6 +244,7 @@ class EngramBackend:
         """Add a declarative memory entry.
 
         Deduplication: if identical text exists in target, bumps access_count.
+        Atomic: de-dup check + add happen under the same lock.
         """
         text = text.strip()
         if not text:
@@ -213,12 +258,14 @@ class EngramBackend:
                     e["updated_at"] = datetime.now().isoformat()
                     return e
 
-        return self._add_internal(text, target, category)
+            # Lock held — atomic add (P0-1 fix: was TOCTOU before)
+            return self._add_internal(text, target, category)
 
     def replace(self, old_text: str, new_text: str, target: str = "memory") -> bool:
         """Replace a memory entry matching old_text substring.
 
         Requires exactly one match for safety.
+        Uses write-then-delete to avoid data loss on crash.
         """
         old_text = old_text.strip()
         new_text = new_text.strip()
@@ -230,30 +277,35 @@ class EngramBackend:
 
             old_entry = matches[0]
             old_id = old_entry.get("memory_id")
-
-            # Remove old
-            if old_id:
-                try:
-                    self.store.delete(old_id)
-                except Exception:
-                    pass
-
-            # Add new
             now = datetime.now().isoformat()
+
+            # Write new FIRST (P0-2 fix: was delete-then-write)
             try:
-                new_id = self.store.save(
+                new_id = self._store.save(
                     new_text,
                     source="hermes",
                     metadata={"target": target, "category": old_entry.get("category", "")},
-                    namespace=target,
+                    namespace=self._ns(target),
                 )
             except Exception as exc:
                 logger.error("Engram replace-save failed: %s", exc)
                 return False
 
+            # Delete old AFTER successful write
+            if old_id:
+                try:
+                    self._store.delete(old_id)
+                    self._by_id.pop(old_id, None)
+                except Exception as exc:
+                    logger.error("replace delete old_id %s failed: %s", old_id, exc)
+                    # New entry already written — old one orphaned in DB
+                    # but user data is preserved (worst case: duplicate)
+
+            # Update in-memory state
             old_entry["text"] = new_text
             old_entry["memory_id"] = new_id
             old_entry["updated_at"] = now
+            self._by_id[new_id] = old_entry
 
         return True
 
@@ -269,9 +321,10 @@ class EngramBackend:
                     mid = e.get("memory_id")
                     if mid:
                         try:
-                            self.store.delete(mid)
-                        except Exception:
-                            pass
+                            self._store.delete(mid)
+                            self._by_id.pop(mid, None)
+                        except Exception as exc:
+                            logger.error("remove delete memory_id %s failed: %s", mid, exc)
                     removed += 1
                 else:
                     new_entries.append(e)
@@ -287,21 +340,26 @@ class EngramBackend:
     def search(self, query: str, target: str = "memory") -> list[dict]:
         """Keyword-based recall via engram-router FTS5 trigram search."""
         try:
-            records = self.store.recall(query, top_k=10, namespace=target)
+            records = self._store.recall(query, top_k=10, namespace=self._ns(target))
         except Exception:
             return []
 
+        # Snapshot _by_id under lock for safe concurrent reads
+        with self._lock:
+            id_map = dict(self._by_id)  # shallow copy — O(1) dict copy
+
         results = []
         for r in records:
-            # Find matching entry in registry by text
-            for e in self._entries[target]:
-                if e.get("memory_id") == r.id:
-                    results.append({**e, "score": r.score,
-                                    "match_reason": r.match_reason,
-                                    "summary": r.summary})
-                    break
+            entry = id_map.get(r.id)
+            if entry is not None:
+                results.append({
+                    **entry,
+                    "score": r.score,
+                    "match_reason": r.match_reason,
+                    "summary": r.summary,
+                })
             else:
-                # New entry from migration or direct save
+                # Entry in DB but not in memory (migration, direct save)
                 results.append({
                     "text": r.raw_text,
                     "memory_id": r.id,
@@ -324,22 +382,34 @@ class EngramBackend:
         """
         try:
             # Broader recall first — get more candidates for better ranking
-            records = self.store.recall(query, top_k=max(top_k * 3, 15), namespace=target)
+            records = self._store.recall(
+                query, top_k=max(top_k * 3, 15), namespace=self._ns(target)
+            )
         except Exception:
             return self.search(query, target=target)[:top_k]
 
+        # Snapshot _by_id under lock for safe concurrent reads
+        with self._lock:
+            id_map = dict(self._by_id)
+
         results = []
         for r in records:
-            entry = None
-            for e in self._entries.get(target, []):
-                if e.get("memory_id") == r.id:
-                    entry = {**e, "score": r.score, "match_reason": r.match_reason,
-                             "summary": r.summary}
-                    break
-            if entry is None:
-                entry = {"text": r.raw_text, "memory_id": r.id, "score": r.score,
-                         "match_reason": r.match_reason, "summary": r.summary}
-            results.append(entry)
+            entry = id_map.get(r.id)
+            if entry is not None:
+                results.append({
+                    **entry,
+                    "score": r.score,
+                    "match_reason": r.match_reason,
+                    "summary": r.summary,
+                })
+            else:
+                results.append({
+                    "text": r.raw_text,
+                    "memory_id": r.id,
+                    "score": r.score,
+                    "match_reason": r.match_reason,
+                    "summary": r.summary,
+                })
 
         results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
