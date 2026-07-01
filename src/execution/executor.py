@@ -509,7 +509,9 @@ def _extract_maxiter_output(raw: str, tool_calls: list) -> str:
     text = text_parts[0].strip()
     if len(text) > 20:
         return text[:2000]
-    return raw[:500]
+    # Nothing useful extracted — don't leak raw JSON to user
+    tools_list = ', '.join(dict.fromkeys(tc.get('tool','?') for tc in tool_calls)) if tool_calls else '?'
+    return f"任务执行超时（{len(tool_calls)} 轮）。使用工具: {tools_list}。请重试或简化查询。"
 
 
 # ─── Execution Router ────────────────────────────
