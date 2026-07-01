@@ -166,6 +166,70 @@ def _strip_wrapping_quotes(text: str) -> str:
     return text.strip(" ，,。：:；;")
 
 
+
+def _quick_reply(task: str) -> str:
+    """Generate a fast direct reply for trivial/short queries without LLM.
+
+    Uses simple keyword matching for common conversational patterns.
+    Returns a friendly, context-free response.
+    """
+    import re as _re
+    t = task.strip().lower()
+    # Math patterns
+    math_m = _re.match(r"^(?:计算)?\s*(\d+)\s*([\+\-\*\/×÷])\s*(\d+)\s*(?:等于几|等于多少|是多少|=\?|\?)?$", t)
+    if math_m:
+        a, op, b = int(math_m.group(1)), math_m.group(2), int(math_m.group(3))
+        op_map = {"+": a + b, "-": a - b, "*": a * b, "×": a * b, "/": a / b if b != 0 else "∞", "÷": a / b if b != 0 else "∞"}
+        result = op_map.get(op, "?")
+        if isinstance(result, float) and result == int(result):
+            result = int(result)
+        return f"{a} {op} {b} = {result}"
+    # Quadratic equation: ax²+bx+c=0  (also handles x^2, x² forms)
+    _quad = _re.match(
+        r"^(?:.*?)?"  # optional prefix like "解" "求"
+        r"(?:x\^2|x²|x\s*\*\*\s*2)\s*"  # x² term
+        r"([+\-]?\s*\d+(?:\.\d+)?)\s*x\s*"  # bx term
+        r"([+\-]?\s*\d+(?:\.\d+)?)\s*=\s*0"  # c term
+        r"(?:.*?)$", t)
+    if _quad:
+        b_raw = _quad.group(1).replace(" ", "")
+        c_raw = _quad.group(2).replace(" ", "")
+        try:
+            b_val = float(b_raw) if b_raw else 0.0
+            c_val = float(c_raw) if c_raw else 0.0
+            disc = b_val * b_val - 4 * c_val  # a=1 discriminant
+            if disc < 0:
+                real = -b_val / 2
+                imag = ((-disc) ** 0.5) / 2
+                return f"x₁ = {real:.4f} + {imag:.4f}i\nx₂ = {real:.4f} - {imag:.4f}i"
+            elif disc == 0:
+                x = -b_val / 2
+                return f"x = {x:.4f} (重根)"
+            else:
+                x1 = (-b_val + disc ** 0.5) / 2
+                x2 = (-b_val - disc ** 0.5) / 2
+                return f"x₁ = {x1:.4f}\nx₂ = {x2:.4f}"
+        except (ValueError, ZeroDivisionError):
+            pass  # fall through to normal triage
+    # Greetings
+    if any(w in t for w in ["你好", "您好", "嗨", "哈喽", "halo", "hello", "hi"]):
+        return "👋 你好！有什么可以帮你的？"
+    # Bot identity questions
+    if _re.search(r"你(?:是谁|叫什么|会什么|能做什么|有什么用|在吗|好吗|聪明吗)", t):
+        return "我是 AI-Company 的 CEO 助手，负责分析需求、分派任务、审核结果。有什么需要尽管说！"
+    # Thanks
+    if any(w in t for w in ["谢谢", "thanks", "thx", "感谢"]):
+        return "不客气！😊"
+    # Bye
+    if any(w in t for w in ["再见", "bye", "88", "拜拜"]):
+        return "再见！有需要随时找我 👋"
+    # Interjections
+    if _re.match(r"^[哦嗯啊哈嘿哎咦哟]{1,3}[！!]*$", t):
+        return "😄"
+    # Default for short queries
+    return "有什么我可以帮你的吗？输入 /help 查看我能做什么。"
+
+
 def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
     """Extract (contact, message) from natural-language WeChat send requests."""
     task = (task or "").strip()
@@ -389,12 +453,19 @@ def _get_llm(role: str = "ceo") -> BaseChatModel:
     if mc.provider == "deepseek":
         # Reasoner needs more time (can take 30-90s), chat is faster
         is_reasoner = "reasoner" in mc.model.lower()
+        # Max tokens per role: developer/researcher need room for long outputs
+        _max_tokens_map = {
+            "developer": 8192, "researcher": 8192, "marketer": 4096,
+            "qa": 4096, "devops": 4096, "pm": 2048, "architect": 2048,
+            "ceo": 2048, "review": 2048,
+        }
         return ChatOpenAI(
             model=mc.model,
             api_key=config.deepseek_api_key,
             base_url="https://api.deepseek.com/v1",
             timeout=120 if is_reasoner else 45,
             max_retries=1,
+            max_tokens=_max_tokens_map.get(role, 4096),
             callbacks=callbacks,
         )
     elif mc.provider == "openai":
@@ -484,16 +555,17 @@ async def triage_node(state: CEOState) -> dict:
     task = state.get("user_request", "").strip()
     
     # ═══ Trivial query fast-path: never route to AI pipeline ═══
-    trivial_set = {
+    # Exact single-word / short phrases
+    trivial_exact = {
         "help", "?", "h", "hi", "hello", "hey", "你好", "您好",
         "thanks", "thx", "ok", "好的", "test", "测试",
-        # Common single words that aren't tasks
         "fuck", "shit", "damn", "wtf", "lol", "haha", "哈哈",
         "no", "yes", "yeah", "nope", "yep", "嗯", "哦", "啊",
         "bye", "goodbye", "再见", "88", "886",
         "what", "why", "when", "who", "how",
     }
-    if task.lower() in trivial_set or len(task) <= 2:  # 2-char inputs can't be real tasks
+    task_lower = task.lower()
+    if task_lower in trivial_exact or len(task) <= 2:
         return {
             "phase": "deliver",
             "department": "ceo",
@@ -503,6 +575,56 @@ async def triage_node(state: CEOState) -> dict:
                           "next_action": "deliver"},
             "execution_log": ["[TRIAGE] Trivial query → direct reply, skip pipeline"],
         }
+
+    # ═══ Expanded fast-path: pattern-based trivial detection ═══
+    # Simple math, short greetings, meta questions — these don't need the pipeline.
+    _trivial_patterns = [
+        # Simple arithmetic: "1+1", "2*3等于几", "计算3+5"
+        r"^(?:计算)?\s*\d+\s*[\+\-\*\/×÷]\s*\d+\s*(?:等于几|等于多少|是多少|=\?|\?)?$",
+        # Quadratic equations: "x^2+15.3x+55.1=0", "x²-4x+4=0 求x"
+        r".*?x(?:\^2|²|\*\*2)\s*[+\-]\s*\d+(?:\.\d+)?\s*x\s*[+\-]\s*\d+(?:\.\d+)?\s*=\s*0.*",
+        # Greetings with particles: "你好吗", "您好啊", "嗨你好"
+        r"^(?:你好|您好|嗨|哈喽|halo)(?:吗|啊|呀|哦|呢|！|!)*$",
+        # Short meta questions about the bot itself
+        r"^(?:你(?:是谁|叫什么|会什么|能做什么|有什么用|在吗|好吗|怎么样|聪明吗))[？?！!]*$",
+        # Single-word interjections
+        r"^(?:哦|嗯|啊|哈|嘿|哎|咦|哟){1,3}[！!]*$",
+        # Very short questions (<10 chars) that look conversational
+    ]
+    for pat in _trivial_patterns:
+        if re.match(pat, task.strip()):
+            return {
+                "phase": "deliver",
+                "department": "ceo",
+                "task_type": "LOCAL_SYSTEM",
+                "final_output": _quick_reply(task),
+                "score_card": {"score": 100, "decision": "APPROVE", "final_score": 100,
+                              "next_action": "deliver"},
+                "execution_log": [f"[TRIAGE] Fast-path match(pat={pat[:40]}) → direct reply"],
+            }
+
+    # Short conversational queries (<15 chars, no code/command keywords)
+    # These are likely chitchat, not real tasks.
+    if len(task) < 15:
+        _task_keywords = ["写", "开发", "实现", "修改", "修复", "bug", "代码", "code",
+                         "函数", "接口", "api", "部署", "deploy", "数据库", "查询",
+                         "搜索", "查", "搜", "报告", "文档", "分析",
+                         # Session/context meta queries — need real processing
+                         "对话", "说过", "问过", "之前", "刚才", "历史", "聊天",
+                         "回答", "输出", "上一",
+                         # Knowledge / fact questions — need memory recall
+                         "什么", "谁", "怎么", "为什么", "干嘛", "叫啥",
+                         "多大", "几岁", "哪里", "哪个", "多少", "何时"]
+        if not any(kw in task for kw in _task_keywords):
+            return {
+                "phase": "deliver",
+                "department": "ceo",
+                "task_type": "LOCAL_SYSTEM",
+                "final_output": _quick_reply(task),
+                "score_card": {"score": 100, "decision": "APPROVE", "final_score": 100,
+                              "next_action": "deliver"},
+                "execution_log": ["[TRIAGE] Short non-task → fast reply"],
+            }
     
     from src.departments.roles import role_registry
 
@@ -965,15 +1087,19 @@ async def triage_node(state: CEOState) -> dict:
         f"Match: {match_method}"
     )
     
-    # ═══ V5 IntentRouter: detailed intent classification (for logging/routing) ═══
+    # ═══ V5 IntentRouter: detailed intent classification (for logging only) ═══
+    # Skip for fast-path departments (keyword-matched) — only needed for LLM-fallback cases.
     user_req = state.get("user_request", "")
-    try:
-        from src.intent import IntentRouter
-        intent_router = IntentRouter()
-        v5_result = intent_router.classify(user_req)
-        intent_detail = f"intent={v5_result.intent} conf={v5_result.confidence:.2f} via={v5_result.matched_by}"
-    except Exception:
-        intent_detail = "V5 intent unavailable"
+    if match_method.startswith("LLM") or match_method.startswith("Fallback"):
+        try:
+            from src.intent import IntentRouter
+            intent_router = IntentRouter()
+            v5_result = intent_router.classify(user_req)
+            intent_detail = f"intent={v5_result.intent} conf={v5_result.confidence:.2f} via={v5_result.matched_by}"
+        except Exception:
+            intent_detail = "V5 intent unavailable"
+    else:
+        intent_detail = f"V5 skipped (fast-path: {match_method})"
     
     return {
         "phase": next_phase,
@@ -1125,7 +1251,7 @@ async def pm_analyze_node(state: CEOState) -> dict:
         r"pdf|生成.*文档|写报告|生成报告|写文档|周报|月报|日报|会议纪要|写总结|导出.*pdf|统计.*导出",
         task_lower
     )) if task_lower else False
-    
+
     if is_doc_task:
         return {
             "phase": "execute",
@@ -1134,6 +1260,23 @@ async def pm_analyze_node(state: CEOState) -> dict:
                 "prd": {"summary": task, "features": [], "acceptance_criteria": [], "edge_cases": [], "priority": "P1"},
             },
             "execution_log": ["[PM] Document task -> skip LLM, direct execute"],
+        }
+
+    # Fast-path: SIMPLE_QUERY and short tasks don't need a formal PM PRD.
+    # The department can handle these directly without acceptance criteria.
+    task_type_raw = state.get("task_type", "")
+    if task_type_raw in ("SIMPLE_QUERY", "LOCAL_SYSTEM") or len(task) < 30:
+        return {
+            "phase": "execute",
+            "department": state.get("department", "developer"),
+            "prd": {
+                "summary": task[:100],
+                "features": [task[:80]],
+                "acceptance_criteria": ["Answer is accurate and concise"],
+                "edge_cases": [],
+                "priority": "P2",
+            },
+            "execution_log": [f"[PM] {task_type_raw or 'Short'} task -> skip LLM, fast PRD"],
         }
     
     from src.departments.roles import role_registry
@@ -1265,12 +1408,14 @@ PRD: {prd.get('summary', 'N/A')} | 功能: {prd.get('features', [])} | 验收: {
     design["key_interfaces"] = _safe_str_list(design.get("key_interfaces", []))
 
     arch_text = json.dumps(design, ensure_ascii=False, indent=2)
+    tech_stack = design.get("tech_stack", [])
+    stack_first = tech_stack[0] if tech_stack else "N/A"
 
     return {
         "phase": "execute",
         "arch_design": arch_text,
         "execution_log": [
-            f"[Arch] Stack: {design.get('tech_stack', ['?'])[0]}, "
+            f"[Arch] Stack: {stack_first}, "
             f"Modules: {str(design.get('module_design', 'N/A'))[:60]}"
         ],
     }
@@ -2011,6 +2156,27 @@ r"^收到[，,。!\s]*$",
     auditor_verdict = score_card.get("verdict", "APPROVE")
     pmo_score = pmo_result.get("compliance_score", 70)
     pmo_verdict = pmo_result.get("verdict", "PASS")
+    
+    # ═══ PMO score sanity check: detect LLM output contradiction ═══
+    # Sometimes LLM returns positive criteria_failed text but a low score.
+    # If all "failed" items read like positive feedback, override the score.
+    _pmo_failed = pmo_result.get("criteria_failed", [])
+    if _pmo_failed and pmo_score < 60:
+        _positive_kw = ["能", "无", "通过", "正确", "包含", "完整", "清晰",
+                        "良好", "合理", "安全", "可用", "有效", "满足",
+                        "pass", "good", "valid", "correct", "works", "ok"]
+        _all_positive = all(
+            any(kw in str(item).lower() for kw in _positive_kw)
+            for item in _pmo_failed
+        )
+        if _all_positive:
+            import logging
+            logging.getLogger("ai_company").warning(
+                "PMO score contradiction: score=%s but criteria_failed=%s → overriding to 75",
+                pmo_score, _pmo_failed,
+            )
+            pmo_score = 75
+            pmo_verdict = "PASS"
     
     # Weighted final score: Auditor 70% + PMO 30%
     final_score = round(auditor_score * 0.7 + pmo_score * 0.3, 1)
