@@ -614,7 +614,9 @@ async def triage_node(state: CEOState) -> dict:
                          "回答", "输出", "上一",
                          # Knowledge / fact questions — need memory recall
                          "什么", "谁", "怎么", "为什么", "干嘛", "叫啥",
-                         "多大", "几岁", "哪里", "哪个", "多少", "何时"]
+                         "多大", "几岁", "哪里", "哪个", "多少", "何时",
+                         # Memory lookup — direct recall, no heavy processing
+                         "最近", "罗列", "列出", "回顾", "总结", "说说"]
         if not any(kw in task for kw in _task_keywords):
             return {
                 "phase": "deliver",
@@ -625,6 +627,20 @@ async def triage_node(state: CEOState) -> dict:
                               "next_action": "deliver"},
                 "execution_log": ["[TRIAGE] Short non-task → fast reply"],
             }
+
+    # Memory lookup queries: 最近/罗列/回顾/总结 + 对话/聊天/记忆
+    # Route to SIMPLE_QUERY so it skips developer/PM pipeline and just uses recall
+    _memory_lookup = ["最近", "罗列", "列出", "回顾", "总结", "说说", "聊聊"]
+    _memory_target = ["对话", "聊天", "记忆", "历史", "之前", "刚才"]
+    if any(kw in task for kw in _memory_lookup) and any(kw in task for kw in _memory_target):
+        return {
+            "phase": "deliver",
+            "department": "ceo",
+            "task_type": "SIMPLE_QUERY",
+            "task": task,
+            "memory_mode": True,
+            "execution_log": ["[TRIAGE] Memory lookup → direct recall, skip department"],
+        }
     
     from src.departments.roles import role_registry
 
@@ -2360,6 +2376,32 @@ async def auto_repair_node(state: CEOState) -> dict:
 @_safe_node("Deliver")
 async def deliver_node(state: CEOState) -> dict:
     """Deliver: finalize task, record episodes, sync memory, and handle role promotion."""
+    
+    # ═══ Memory Mode: direct recall, no department processing ═══
+    if state.get("memory_mode"):
+        from src.memory.hermes import hermes_memory
+        task = state.get("user_request", "")
+        try:
+            records = hermes_memory.store.recall(task, top_k=10)
+        except Exception:
+            records = hermes_memory.search(task, "memory")[:10]
+        
+        if records:
+            lines = ["## 记忆中的对话\n"]
+            for i, r in enumerate(records, 1):
+                text = getattr(r, 'raw_text', r.get('text', ''))
+                lines.append(f"{i}. {text}")
+            return {
+                "final_output": "\n".join(lines),
+                "phase": "deliver",
+                "score_card": {"score": 100, "decision": "APPROVE", "next_action": "deliver"},
+            }
+        return {
+            "final_output": "没有找到相关的对话记录。",
+            "phase": "deliver",
+            "score_card": {"score": 100, "decision": "APPROVE", "next_action": "deliver"},
+        }
+    
     from src.departments.roles import role_registry
     from src.evolution.engine import record_completed_task
     
