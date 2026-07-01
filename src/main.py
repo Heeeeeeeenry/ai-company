@@ -422,10 +422,9 @@ async def run_cli():
             continue
 
         phase = result.get("phase", "?")
-        score = result.get("score_card", {}).get("final_score",
-                result.get("score_card", {}).get("score", "—"))
-        verdict = result.get("score_card", {}).get("decision",
-                  result.get("score_card", {}).get("verdict", ""))
+        score_card = result.get("score_card") or {}
+        score = score_card.get("final_score", score_card.get("score", "—"))
+        verdict = score_card.get("decision", score_card.get("verdict", ""))
         logs = result.get("execution_log", [])
 
         # Result header
@@ -1261,7 +1260,8 @@ def main():
                 result = await run_ceo(query)
                 print(f"\n{'='*50}")
                 print(f"Phase: {result.get('phase')}")
-                print(f"Score: {result.get('score_card', {}).get('score', 'N/A')}/100")
+                sc = result.get('score_card') or {}
+                print(f"Score: {sc.get('score', 'N/A')}/100")
                 logs = result.get('execution_log', [])
                 if logs:
                     print(f"\nExecution:")
