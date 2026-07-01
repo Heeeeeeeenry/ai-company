@@ -2377,7 +2377,7 @@ async def auto_repair_node(state: CEOState) -> dict:
 async def deliver_node(state: CEOState) -> dict:
     """Deliver: finalize task, record episodes, sync memory, and handle role promotion."""
     
-    # ═══ Memory Mode: direct recall, no department processing ═══
+    # ═══ Memory Mode: do recall, then fall through to normal deliver ═══
     if state.get("memory_mode"):
         from src.memory.hermes import hermes_memory
         task = state.get("user_request", "")
@@ -2391,17 +2391,13 @@ async def deliver_node(state: CEOState) -> dict:
             for i, r in enumerate(records, 1):
                 text = getattr(r, 'raw_text', r.get('text', ''))
                 lines.append(f"{i}. {text}")
-            return {
-                "final_output": "\n".join(lines),
-                "phase": "deliver",
-                "score_card": {"score": 100, "decision": "APPROVE", "next_action": "deliver"},
-            }
-        return {
-            "final_output": "没有找到相关的对话记录。",
-            "phase": "deliver",
-            "score_card": {"score": 100, "decision": "APPROVE", "next_action": "deliver"},
-        }
-    
+            state["final_output"] = "\n".join(lines)
+        else:
+            state["final_output"] = "没有找到相关的对话记录。"
+        state["score_card"] = {"score": 100, "decision": "APPROVE",
+                               "final_score": 100, "next_action": "deliver"}
+        state["phase"] = "deliver"
+        # Don't return early — let normal deliver logic run
     from src.departments.roles import role_registry
     from src.evolution.engine import record_completed_task
     
