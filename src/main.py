@@ -443,6 +443,11 @@ async def run_cli():
 
         # Output
         final = result.get("final_output", "")
+        
+        # Global fallback — never show empty output
+        if not final or not final.strip():
+            final = "有什么我可以帮你的吗？输入 /help 查看我能做什么。"
+        
         if final:
             from src.ceo.graph import _clean_output
             cleaned = _clean_output(final)
