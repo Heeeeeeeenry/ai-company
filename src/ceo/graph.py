@@ -48,6 +48,7 @@ class CEOState(TypedDict):
     arch_design: Optional[str]                 # Architect's design output
     workspace_id: Optional[str]                # Task workspace ID for context sharing
     task_type: Optional[str]                   # COMMAND_EXECUTION|SIMPLE_QUERY|RESEARCH|CODING|DOCUMENT|CREATIVE|GENERAL
+    memory_mode: Optional[bool]                # Direct memory recall, skip department pipeline
     hierarchical_plan: Optional[dict]           # P1.2: HierarchicalPlan serialized (goal, phases, current_phase)
     phase_outputs: Annotated[list, operator.add]  # P1.2: accumulated outputs from each phase
 
@@ -616,7 +617,9 @@ async def triage_node(state: CEOState) -> dict:
                          "什么", "谁", "怎么", "为什么", "干嘛", "叫啥",
                          "多大", "几岁", "哪里", "哪个", "多少", "何时",
                          # Memory lookup — direct recall, no heavy processing
-                         "最近", "罗列", "列出", "回顾", "总结", "说说"]
+                         "最近", "罗列", "列出", "回顾", "总结", "说说",
+                         # System / general queries — need real answer
+                         "时间", "日期", "今天", "现在"]
         if not any(kw in task for kw in _task_keywords):
             return {
                 "phase": "deliver",
