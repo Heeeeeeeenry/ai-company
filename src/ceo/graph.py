@@ -560,10 +560,17 @@ async def triage_node(state: CEOState) -> dict:
     from datetime import datetime
     _now = datetime.now()
     _time_patterns = [
+        # "现在的时间", "当前时间", "现在几点", "几点了"
         (r"^(?:现在|当前)(?:的|是)?时间(?:是|为)?(?:多少|几点|几|什么)?$", lambda: f"现在是 {_now.strftime('%Y年%m月%d日 %H:%M:%S')}"),
-        (r"^(?:现在|今天)(?:的|是)?日期(?:是|为)?(?:多少|几号|什么)?$", lambda: f"今天是 {_now.strftime('%Y年%m月%d日（%A）')}"),
         (r"^(?:现在)?几点(?:了|钟)?$", lambda: _now.strftime('%H:%M:%S')),
-        (r"^今天(?:是)?星期(?:几|什么)$", lambda: f"今天是{_now.strftime('%A')}"),
+        # "今天日期", "今天几号", "今天周几", "今天星期几"
+        (r"^今天(?:的|是)?(?:日期|几号)(?:是|为)?(?:多少|什么)?$", lambda: f"今天是 {_now.strftime('%Y年%m月%d日（%A）')}"),
+        (r"^今天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"今天是{_now.strftime('%A')}"),
+        # "明天周几", "后天周几", "昨天周几"
+        (r"^明天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"明天是{(_now + __import__('datetime').timedelta(days=1)).strftime('%A')}"),
+        (r"^后天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"后天是{(_now + __import__('datetime').timedelta(days=2)).strftime('%A')}"),
+        (r"^昨天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"昨天是{(_now - __import__('datetime').timedelta(days=1)).strftime('%A')}"),
+        # "现在几月", "几月份"
         (r"^(?:现在|当前)(?:是)?(?:几月|几月份|什么月)$", lambda: f"现在是{_now.strftime('%m月')}"),
     ]
     for pat, reply_fn in _time_patterns:
@@ -642,7 +649,7 @@ async def triage_node(state: CEOState) -> dict:
                          # Memory lookup — direct recall, no heavy processing
                          "最近", "罗列", "列出", "回顾", "总结", "说说",
                          # System / general queries — need real answer
-                         "时间", "日期", "今天", "现在"]
+                         "时间", "日期", "今天", "明天", "后天", "昨天", "现在"]
         if not any(kw in task for kw in _task_keywords):
             return {
                 "phase": "deliver",
