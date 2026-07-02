@@ -555,6 +555,29 @@ async def triage_node(state: CEOState) -> dict:
     
     task = state.get("user_request", "").strip()
     
+    # ═══ System queries — answer instantly without LLM ═══
+    # These are deterministic system-level queries that never need AI
+    from datetime import datetime
+    _now = datetime.now()
+    _time_patterns = [
+        (r"^(?:现在|当前)(?:的|是)?时间(?:是|为)?(?:多少|几点|几|什么)?$", lambda: f"现在是 {_now.strftime('%Y年%m月%d日 %H:%M:%S')}"),
+        (r"^(?:现在|今天)(?:的|是)?日期(?:是|为)?(?:多少|几号|什么)?$", lambda: f"今天是 {_now.strftime('%Y年%m月%d日（%A）')}"),
+        (r"^(?:现在)?几点(?:了|钟)?$", lambda: _now.strftime('%H:%M:%S')),
+        (r"^今天(?:是)?星期(?:几|什么)$", lambda: f"今天是{_now.strftime('%A')}"),
+        (r"^(?:现在|当前)(?:是)?(?:几月|几月份|什么月)$", lambda: f"现在是{_now.strftime('%m月')}"),
+    ]
+    for pat, reply_fn in _time_patterns:
+        if re.match(pat, task):
+            return {
+                "phase": "deliver",
+                "department": "ceo",
+                "task_type": "LOCAL_SYSTEM",
+                "final_output": reply_fn(),
+                "score_card": {"score": 100, "decision": "APPROVE", "final_score": 100,
+                              "next_action": "deliver"},
+                "execution_log": ["[TRIAGE] System query → instant reply"],
+            }
+
     # ═══ Trivial query fast-path: never route to AI pipeline ═══
     # Exact single-word / short phrases
     trivial_exact = {
@@ -566,7 +589,7 @@ async def triage_node(state: CEOState) -> dict:
         "what", "why", "when", "who", "how",
     }
     task_lower = task.lower()
-    if task_lower in trivial_exact or len(task) <= 2:
+    if task_lower in trivial_exact or (len(task) <= 2 and task not in ("时间", "日期", "年代", "年份", "小时", "分钟")):
         return {
             "phase": "deliver",
             "department": "ceo",
