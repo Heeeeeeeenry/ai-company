@@ -2377,7 +2377,7 @@ async def auto_repair_node(state: CEOState) -> dict:
 async def deliver_node(state: CEOState) -> dict:
     """Deliver: finalize task, record episodes, sync memory, and handle role promotion."""
     
-    # ═══ Memory Mode: do recall, then fall through to normal deliver ═══
+    # ═══ Memory Mode: do recall, then return directly ═══
     if state.get("memory_mode"):
         from src.memory.hermes import hermes_memory
         task = state.get("user_request", "")
@@ -2389,15 +2389,21 @@ async def deliver_node(state: CEOState) -> dict:
         if records:
             lines = ["## 记忆中的对话\n"]
             for i, r in enumerate(records, 1):
-                text = getattr(r, 'raw_text', r.get('text', ''))
-                lines.append(f"{i}. {text}")
+                text = getattr(r, 'raw_text', r.get('text', '')) if hasattr(r, 'raw_text') or hasattr(r, 'get') else str(r)
+                if text:
+                    lines.append(f"{i}. {text}")
             state["final_output"] = "\n".join(lines)
         else:
             state["final_output"] = "没有找到相关的对话记录。"
         state["score_card"] = {"score": 100, "decision": "APPROVE",
                                "final_score": 100, "next_action": "deliver"}
         state["phase"] = "deliver"
-        # Don't return early — let normal deliver logic run
+        return {
+            "phase": "complete",
+            "final_output": state["final_output"],
+            "score_card": state["score_card"],
+            "execution_log": ["[DELIVER] Memory recall complete"],
+        }
     from src.departments.roles import role_registry
     from src.evolution.engine import record_completed_task
     
@@ -2443,9 +2449,12 @@ async def deliver_node(state: CEOState) -> dict:
             promotion_msg = f"\n\n🎉 试用角色 **{role.display_name}** 已完成 3 次成功任务，晋升为正式角色！"
     
     # Keep the department output, don't overwrite with agent summary
-    # Clean any JSON wrapper that leaked through
+    # Clean any JSON wrapper that leaked through (skip memory_mode output)
     dept_output = state.get("final_output", "")
-    dept_output = _clean_output(str(dept_output)) if dept_output else ""
+    if state.get("memory_mode") or (dept_output and dept_output.startswith("## ")):
+        pass  # memory mode output is already clean markdown
+    else:
+        dept_output = _clean_output(str(dept_output)) if dept_output else ""
     if promotion_msg:
         dept_output = str(dept_output) + promotion_msg
     
