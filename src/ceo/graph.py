@@ -651,6 +651,24 @@ async def triage_node(state: CEOState) -> dict:
                          # System / general queries — need real answer
                          "时间", "日期", "今天", "明天", "后天", "昨天", "现在"]
         if not any(kw in task for kw in _task_keywords):
+            # Query is short and doesn't match any known pattern.
+            # Use lightweight LLM instead of canned reply — always gets a real answer.
+            try:
+                llm = _get_llm("ceo")
+                reply = llm.invoke(f"用中文简短回答（1-2句）：{task}").content
+                if reply and reply.strip():
+                    return {
+                        "phase": "deliver",
+                        "department": "ceo",
+                        "task_type": "SIMPLE_QUERY",
+                        "final_output": reply.strip(),
+                        "score_card": {"score": 100, "decision": "APPROVE", "final_score": 100,
+                                      "next_action": "deliver"},
+                        "execution_log": ["[TRIAGE] Short query → lightweight LLM"],
+                    }
+            except Exception:
+                pass
+            # LLM failed — fall back to _quick_reply which always returns something
             return {
                 "phase": "deliver",
                 "department": "ceo",
