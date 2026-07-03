@@ -3,6 +3,7 @@
 from typing import TypedDict, Annotated, Optional
 from datetime import datetime
 import operator
+import subprocess
 
 # ═══ Global switches ───
 AUDIT_ENABLED = True  # /audit on|off — when False, skip Auditor+PMO for all tasks
@@ -22,10 +23,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
 from src.config import config
+from src.llm_factory import get_llm, extract_json
 from src.memory.store import (
     episode_memory, get_agent_state, PendingProposal,
     sync_episode_to_chroma,
 )
+
+# ─── Backward-compatible aliases for existing callers ───
+_extract_json = extract_json
+_get_llm = get_llm
 
 
 # ─── State ───────────────────────────────────────
@@ -53,33 +59,45 @@ class CEOState(TypedDict):
     phase_outputs: Annotated[list, operator.add]  # P1.2: accumulated outputs from each phase
 
 
-# ─── JSON Extraction Helper ───────────────────
+def _format_lunar_day(n: int) -> str:
+    digits = "一二三四五六七八九十"
+    if n <= 0 or n > 30:
+        return str(n)
+    if n <= 10:
+        return "初" + digits[n - 1]
+    if n < 20:
+        return "十" + (digits[n - 11] if n > 10 else "")
+    if n == 20:
+        return "二十"
+    if n < 30:
+        return "廿" + digits[n - 21]
+    return "三十"
 
-def _extract_json(text: str) -> dict:
-    """Robust JSON extraction from LLM output with markdown fences."""
-    import re
-    # Try markdown code fence first
-    fence_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1).strip()
-    # Find outermost balanced braces
-    depth = 0
-    start = -1
-    for i, ch in enumerate(text):
-        if ch == '{':
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == '}':
-            depth -= 1
-            if depth == 0 and start >= 0:
-                return json.loads(text[start:i+1])
-    # Fallback: simple find
-    s = text.find("{")
-    e = text.rfind("}")
-    if s >= 0 and e > s:
-        return json.loads(text[s:e+1])
-    raise ValueError("No valid JSON object found")
+
+def _format_lunar_month(n: int) -> str:
+    months = ["正", "二", "三", "四", "五", "六", "七", "八", "九", "十", "冬", "腊"]
+    if 1 <= n <= 12:
+        return months[n - 1] + "月"
+    return f"{n}月"
+
+
+def _try_system_lunar(date_obj) -> Optional[str]:
+    """Best-effort local lunar lookup using macOS calendar command output.
+
+    Returns a formatted Chinese lunar string or None.
+    Never uses network.
+    """
+    try:
+        cmd = ["/usr/bin/calendar", "-A", "7", "-B", "0"]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        text = (res.stdout or "") + "\n" + (res.stderr or "")
+        if not text.strip():
+            return None
+        # Weak parse hook reserved for future enhancement; current macOS output often lacks lunar data.
+        # Keep deterministic fallback behavior by returning None when no trusted parse is available.
+        return None
+    except Exception:
+        return None
 
 
 def _clean_output(raw: str) -> str:
@@ -169,66 +187,61 @@ def _strip_wrapping_quotes(text: str) -> str:
 
 
 def _quick_reply(task: str) -> str:
-    """Generate a fast direct reply for trivial/short queries without LLM.
-
-    Uses simple keyword matching for common conversational patterns.
-    Returns a friendly, context-free response.
-    """
+    """Generate a fast direct reply for trivial/short queries without LLM."""
     import re as _re
     t = task.strip().lower()
     # Math patterns
-    math_m = _re.match(r"^(?:计算)?\s*(\d+)\s*([\+\-\*\/×÷])\s*(\d+)\s*(?:等于几|等于多少|是多少|=\?|\?)?$", t)
+    math_m = _re.match(
+        r"^(?:计算)?\s*(\d+)\s*([\+\-\*\/×÷])\s*(\d+)\s*(?:等于几|等于多少|是多少|=\?|\?)?$", t
+    )
     if math_m:
         a, op, b = int(math_m.group(1)), math_m.group(2), int(math_m.group(3))
-        op_map = {"+": a + b, "-": a - b, "*": a * b, "×": a * b, "/": a / b if b != 0 else "∞", "÷": a / b if b != 0 else "∞"}
+        op_map = {"+": a + b, "-": a - b, "*": a * b, "×": a * b,
+                  "/": a / b if b != 0 else "∞", "÷": a / b if b != 0 else "∞"}
         result = op_map.get(op, "?")
         if isinstance(result, float) and result == int(result):
             result = int(result)
         return f"{a} {op} {b} = {result}"
-    # Quadratic equation: ax²+bx+c=0  (also handles x^2, x² forms)
     _quad = _re.match(
-        r"^(?:.*?)?"  # optional prefix like "解" "求"
-        r"(?:x\^2|x²|x\s*\*\*\s*2)\s*"  # x² term
-        r"([+\-]?\s*\d+(?:\.\d+)?)\s*x\s*"  # bx term
-        r"([+\-]?\s*\d+(?:\.\d+)?)\s*=\s*0"  # c term
+        r"^(?:.*?)?"
+        r"(?:x\^2|x²|x\s*\*\*\s*2)\s*"
+        r"([+\-]?\s*\d+(?:\.\d+)?)\s*x\s*"
+        r"([+\-]?\s*\d+(?:\.\d+)?)\s*=\s*0"
         r"(?:.*?)$", t)
     if _quad:
-        b_raw = _quad.group(1).replace(" ", "")
-        c_raw = _quad.group(2).replace(" ", "")
         try:
+            b_raw = _quad.group(1).replace(" ", "")
+            c_raw = _quad.group(2).replace(" ", "")
             b_val = float(b_raw) if b_raw else 0.0
             c_val = float(c_raw) if c_raw else 0.0
-            disc = b_val * b_val - 4 * c_val  # a=1 discriminant
+            disc = b_val * b_val - 4 * c_val
             if disc < 0:
                 real = -b_val / 2
                 imag = ((-disc) ** 0.5) / 2
                 return f"x₁ = {real:.4f} + {imag:.4f}i\nx₂ = {real:.4f} - {imag:.4f}i"
-            elif disc == 0:
+            if disc == 0:
                 x = -b_val / 2
                 return f"x = {x:.4f} (重根)"
-            else:
-                x1 = (-b_val + disc ** 0.5) / 2
-                x2 = (-b_val - disc ** 0.5) / 2
-                return f"x₁ = {x1:.4f}\nx₂ = {x2:.4f}"
+            x1 = (-b_val + disc ** 0.5) / 2
+            x2 = (-b_val - disc ** 0.5) / 2
+            return f"x₁ = {x1:.4f}\nx₂ = {x2:.4f}"
         except (ValueError, ZeroDivisionError):
-            pass  # fall through to normal triage
-    # Greetings
+            pass
     if any(w in t for w in ["你好", "您好", "嗨", "哈喽", "halo", "hello", "hi"]):
         return "👋 你好！有什么可以帮你的？"
-    # Bot identity questions
     if _re.search(r"你(?:是谁|叫什么|会什么|能做什么|有什么用|在吗|好吗|聪明吗)", t):
         return "我是 AI-Company 的 CEO 助手，负责分析需求、分派任务、审核结果。有什么需要尽管说！"
-    # Thanks
     if any(w in t for w in ["谢谢", "thanks", "thx", "感谢"]):
         return "不客气！😊"
-    # Bye
     if any(w in t for w in ["再见", "bye", "88", "拜拜"]):
         return "再见！有需要随时找我 👋"
-    # Interjections
     if _re.match(r"^[哦嗯啊哈嘿哎咦哟]{1,3}[！!]*$", t):
         return "😄"
-    # Default for short queries
-    return "有什么我可以帮你的吗？输入 /help 查看我能做什么。"
+    if any(w in t for w in ["放屁", "扯淡", "胡说", "瞎说", "傻", "笨", "蠢", "弱智", "垃圾"]):
+        return "别急，我在。你要么直接说哪儿答错了，要么把你想要的结果丢给我，我马上改。"
+    if any(w in t for w in ["哈哈", "牛逼", "666", "太棒", "厉害", "真的假的"]):
+        return "收到，继续。你要我接着干哪一段？"
+    return "我在，直接说事。"
 
 
 def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
@@ -426,68 +439,6 @@ def _parse_capabilities_from_timeline(context_md: str) -> list[str]:
     return []
 
 
-# ─── LLM Factory ─────────────────────────────────
-
-def _get_llm(role: str = "ceo") -> BaseChatModel:
-    """Create LLM instance. DeepSeek uses OpenAI-compatible API.
-    Includes token tracking via TokenTracker callback."""
-    mc = config.get_model_for(role)
-    
-    try:
-        from langchain_openai import ChatOpenAI
-    except ImportError:
-        raise ImportError("langchain-openai required. Run: pip install langchain-openai")
-    
-    # Token tracking callback (best-effort, non-blocking)
-    from src.utils.token_tracker import get_token_tracker
-    tracker = get_token_tracker()
-    tracker.set_context(role=role)
-    callbacks = [tracker]
-    
-    # Timing callback (records LLM call duration)
-    try:
-        from src.utils.timing import TimingCallback
-        callbacks.append(TimingCallback(role=role, model=mc.model))
-    except ImportError:
-        pass
-    
-    if mc.provider == "deepseek":
-        # Reasoner needs more time (can take 30-90s), chat is faster
-        is_reasoner = "reasoner" in mc.model.lower()
-        # Max tokens per role: developer/researcher need room for long outputs
-        _max_tokens_map = {
-            "developer": 8192, "researcher": 8192, "marketer": 4096,
-            "qa": 4096, "devops": 4096, "pm": 2048, "architect": 2048,
-            "ceo": 2048, "review": 2048,
-        }
-        return ChatOpenAI(
-            model=mc.model,
-            api_key=config.deepseek_api_key,
-            base_url="https://api.deepseek.com/v1",
-            timeout=120 if is_reasoner else 45,
-            max_retries=1,
-            max_tokens=_max_tokens_map.get(role, 4096),
-            callbacks=callbacks,
-        )
-    elif mc.provider == "openai":
-        return ChatOpenAI(
-            model=mc.model,
-            api_key=config.openai_api_key,
-            timeout=45,
-            max_retries=1,
-            callbacks=callbacks,
-        )
-    elif mc.provider == "anthropic":
-        try:
-            from langchain_anthropic import ChatAnthropic
-            return ChatAnthropic(model=mc.model, api_key=config.anthropic_api_key,
-                                callbacks=callbacks)
-        except ImportError:
-            raise ImportError("langchain-anthropic required for Anthropic models")
-    
-    raise ValueError(f"Unknown provider: {mc.provider}")
-
-
 # --- CEO Prompts ---
 
 CEO_SYSTEM_PROMPT = """你是AI公司CEO. 不亲自执行, 只做: 路由意图->规划步骤->分派角色->汇总Auditor+PMO评分->交付.
@@ -559,6 +510,7 @@ async def triage_node(state: CEOState) -> dict:
     # These are deterministic system-level queries that never need AI
     from datetime import datetime
     _now = datetime.now()
+    from datetime import timedelta
     _time_patterns = [
         # "现在的时间", "当前时间", "现在几点", "几点了"
         (r"^(?:现在|当前)(?:的|是)?时间(?:是|为)?(?:多少|几点|几|什么)?$", lambda: f"现在是 {_now.strftime('%Y年%m月%d日 %H:%M:%S')}"),
@@ -567,9 +519,9 @@ async def triage_node(state: CEOState) -> dict:
         (r"^今天(?:的|是)?(?:日期|几号)(?:是|为)?(?:多少|什么)?$", lambda: f"今天是 {_now.strftime('%Y年%m月%d日（%A）')}"),
         (r"^今天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"今天是{_now.strftime('%A')}"),
         # "明天周几", "后天周几", "昨天周几"
-        (r"^明天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"明天是{(_now + __import__('datetime').timedelta(days=1)).strftime('%A')}"),
-        (r"^后天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"后天是{(_now + __import__('datetime').timedelta(days=2)).strftime('%A')}"),
-        (r"^昨天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"昨天是{(_now - __import__('datetime').timedelta(days=1)).strftime('%A')}"),
+        (r"^明天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"明天是{(_now + timedelta(days=1)).strftime('%A')}"),
+        (r"^后天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"后天是{(_now + timedelta(days=2)).strftime('%A')}"),
+        (r"^昨天(?:是)?(?:周几|星期几|礼拜几)$", lambda: f"昨天是{(_now - timedelta(days=1)).strftime('%A')}"),
         # "现在几月", "几月份"
         (r"^(?:现在|当前)(?:是)?(?:几月|几月份|什么月)$", lambda: f"现在是{_now.strftime('%m月')}"),
     ]
@@ -584,6 +536,30 @@ async def triage_node(state: CEOState) -> dict:
                               "next_action": "deliver"},
                 "execution_log": ["[TRIAGE] System query → instant reply"],
             }
+
+    _lunar_offsets = [("今天", 0), ("明天", 1), ("后天", 2), ("昨天", -1)]
+    if any(k in task for k in ("农历", "阴历")) and any(k in task for k, _ in _lunar_offsets):
+        for label, days in _lunar_offsets:
+            if label in task:
+                target = _now + timedelta(days=days)
+                lunar = _try_system_lunar(target)
+                if lunar:
+                    final_output = f"{label}是公历{target.strftime('%Y年%m月%d日')}，对应{lunar}。"
+                else:
+                    final_output = (
+                        f"{label}是公历{target.strftime('%Y年%m月%d日')}。"
+                        "当前本机环境没有可用的本地农历数据源，所以我先不给你瞎报阴历，"
+                        "也不会再走 researcher 搜索给你残句。"
+                    )
+                return {
+                    "phase": "deliver",
+                    "department": "ceo",
+                    "task_type": "LOCAL_SYSTEM",
+                    "final_output": final_output,
+                    "score_card": {"score": 100, "decision": "APPROVE", "final_score": 100,
+                                  "next_action": "deliver"},
+                    "execution_log": ["[TRIAGE] Lunar query → local fast-path"],
+                }
 
     # ═══ Trivial query fast-path: never route to AI pipeline ═══
     # Exact single-word / short phrases
@@ -2490,6 +2466,18 @@ async def deliver_node(state: CEOState) -> dict:
     token_tracker = get_token_tracker()
     token_tracker.save()
     
+    # ── Auto-save conversation turn to engram long-term memory ──
+    # Each turn is persisted so semantic search can recall prior context
+    # across sessions.  should_inject() filters out irrelevant memories
+    # during recall, so storing everything is safe.
+    try:
+        from src.memory.hermes import hermes_memory
+        user_msg = state.get("user_request", "")
+        if user_msg.strip():
+            hermes_memory.add(user_msg, "memory")
+    except Exception:
+        pass  # Non-critical — don't fail delivery over memory save
+    
     # Trial role promotion check
     score = score_card.get("final_score", score_card.get("score", 0))
     promotion_msg = ""
@@ -2895,7 +2883,7 @@ def _inject_session_context(state: dict) -> None:
                     logger.debug("Semantic memory: injected %d relevant facts",
                                  len(relevant))
             except Exception:
-                pass
+                logger.error("Semantic memory search failed", exc_info=True)
 
         # Fallback: only inject full context if query likely needs memory
         if not hermes_ctx:
@@ -2907,9 +2895,11 @@ def _inject_session_context(state: dict) -> None:
                     hermes_ctx = ""
                     logger.debug("Skipped memory injection for non-relevant query")
             except Exception:
+                logger.error("Full memory context injection failed", exc_info=True)
                 hermes_ctx = ""
     except Exception:
-        pass
+        logger.error("hermes_memory unavailable — context injection skipped", exc_info=True)
+        hermes_ctx = ""
 
     # ── Recent conversation turns (compact, last 5) ──
     history_text = ""
@@ -2923,15 +2913,17 @@ def _inject_session_context(state: dict) -> None:
             history_raw = mem.get_recent_conversations(5)
             if history_raw:
                 turns = []
-                for t in history_raw:
-                    q = t.get("user", "")[:150]
-                    a = t.get("assistant", "")[:150]
+                for i, t in enumerate(history_raw):
+                    # Most recent turn: keep full (carries current mode/instruction)
+                    limit = 500 if i == 0 else 300
+                    q = t.get("user", "")[:limit * 2]  # user messages usually shorter
+                    a = t.get("assistant", "")[:limit]
                     if q or a:
                         turns.append(f"Q: {q}\nA: {a}")
                 if turns:
                     history_text = "## 最近对话 (Recent Conversation)\n" + "\n---\n".join(turns)
     except Exception:
-        pass
+        logger.error("Conversation history retrieval failed", exc_info=True)
 
     # ═══ Token Budget Control ═══
     # If hermes_ctx + history_text exceeds budget, trim intelligently
@@ -2992,8 +2984,26 @@ def _inject_session_context(state: dict) -> None:
                 state["execution_log"] = [f"[MEMORY] Loaded context ({sum(len(p) for p in context_parts)} chars)"]
 
 
-async def run_ceo(user_message: str) -> CEOState:
-    """Run the CEO workflow on a user message. Returns final state."""
+async def run_ceo(user_message: str) -> dict:
+    """Run CEO workflow via Thin Dispatcher.
+
+    Delegates to src.ceo.dispatcher.run_ceo for the new thin-CEO architecture.
+    The old LangGraph pipeline (build_ceo_graph) is preserved in this file
+    for reference and can be used via run_ceo_legacy().
+    """
+    from src.ceo.dispatcher import UseLegacyGraph, run_ceo as thin_run_ceo
+    try:
+        return await thin_run_ceo(user_message)
+    except UseLegacyGraph:
+        return await run_ceo_legacy(user_message)
+    except Exception:
+        logger = __import__('logging').getLogger('ai_company.ceo')
+        logger.exception("Thin CEO dispatcher failed, falling back to legacy graph")
+        return await run_ceo_legacy(user_message)
+
+
+async def run_ceo_legacy(user_message: str) -> dict:
+    """Original LangGraph CEO pipeline (preserved as fallback)."""
     graph = build_ceo_graph()
     app = graph.compile(checkpointer=MemorySaver())
     
