@@ -202,7 +202,7 @@ async def run_cli():
             from prompt_toolkit.completion import Completer, Completion, CompleteEvent
             from prompt_toolkit.styles import Style
             class _Cmd(Completer):
-                D = {"/help":"显示帮助","/status":"系统状态","/roles":"查看角色","/token":"Token用量",
+                D = {"/help":"显示帮助","/status":"系统状态","/model":"查看/切换模型","/roles":"查看角色","/token":"Token用量",
                      "/timer":"计时开关","/audit":"审查开关","/optimize":"自动优化","/improve":"进化报告",
                      "/mood":"今日心情","/whois":"联系人画像","/remember":"记住事实","/session":"会话管理",
                      "/vision":"视觉工具","/clear":"清屏","/quit":"退出","/fix":"自我修复",
@@ -374,6 +374,9 @@ async def run_cli():
         if user_input.lower() == "/status":
             _show_status(console, plat, roles, store)
             continue
+        if user_input.lower().startswith("/model"):
+            await _cmd_model(console, user_input)
+            continue
         if user_input.lower() == "/roles":
             _show_roles(console, roles)
             continue
@@ -483,6 +486,7 @@ def _show_help(console):
     table.add_column(style="dim")
     table.add_row("/help, /?          ", "显示帮助(也可直接输入 help)")
     table.add_row("/status            ", "系统状态")
+    table.add_row("/model [list|ID]   ", "查看/切换 OneAPI 模型")
     table.add_row("/roles             ", "查看所有角色")
     table.add_row("/token, /usage     ", "Token用量统计")
     table.add_row("/timer on|off      ", "任务耗时统计开关")
@@ -498,6 +502,67 @@ def _show_help(console):
     table.add_row("/quit, /q          ", "退出")
     console.print(table)
     console.print("\n[dim]💡 直接输入问题即可，不需要加任何前缀[/dim]")
+
+
+async def _cmd_model(console, user_input: str):
+    """Hermes-style model viewer/switcher for the ai-company CLI."""
+    from rich.table import Table
+    from rich.panel import Panel
+    from src.model_config import load_runtime_model, list_oneapi_models, save_runtime_model
+
+    parts = user_input.strip().split(maxsplit=1)
+    cfg = load_runtime_model()
+
+    if len(parts) == 1 or parts[1].strip().lower() in {"status", "current"}:
+        console.print(Panel(
+            f"Provider: {cfg.provider}\nModel: {cfg.model}\nBase URL: {cfg.base_url}\n\n"
+            "用法:\n"
+            "  /model list            列出 OneAPI 可用模型\n"
+            "  /model gpt-5.5         切换模型\n"
+            "  /model DeepSeek-V4-Pro 切换到 DeepSeek 路由",
+            title="🤖 当前模型",
+            border_style="cyan",
+        ))
+        return
+
+    arg = parts[1].strip()
+    if arg.lower() in {"list", "ls"}:
+        try:
+            models = list_oneapi_models(cfg.base_url)
+        except Exception as exc:
+            console.print(f"[red]模型列表获取失败: {type(exc).__name__}: {exc}[/red]")
+            return
+        table = Table(title="OneAPI 模型")
+        table.add_column("当前", style="green")
+        table.add_column("Model ID", style="cyan")
+        for model_id in models:
+            table.add_row("*" if model_id == cfg.model else "", model_id)
+        console.print(table)
+        return
+
+    model_id = arg
+    if "/" in model_id:
+        provider, _, model_id = model_id.partition("/")
+        if provider and provider != "oneapi":
+            console.print("[yellow]当前仅支持 OneAPI OpenAI-compatible provider；已忽略 provider 前缀。[/yellow]")
+    try:
+        models = list_oneapi_models(cfg.base_url)
+    except Exception as exc:
+        console.print(f"[red]切换前验证失败: {type(exc).__name__}: {exc}[/red]")
+        return
+    if model_id not in models:
+        suggestions = [m for m in models if model_id.lower() in m.lower()]
+        hint = "\n相近模型: " + ", ".join(suggestions[:6]) if suggestions else ""
+        console.print(f"[red]OneAPI 模型不存在: {model_id}[/red]{hint}")
+        return
+
+    new_cfg = save_runtime_model(model_id, provider="oneapi", base_url=cfg.base_url)
+    console.print(Panel(
+        f"已切换到: oneapi/{new_cfg.model}\nBase URL: {new_cfg.base_url}\n"
+        "新 LLM 调用会立即使用该模型。",
+        title="✅ 模型已切换",
+        border_style="green",
+    ))
 
 
 async def _cmd_self_heal(console):

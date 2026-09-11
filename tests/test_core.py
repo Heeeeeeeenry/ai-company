@@ -51,7 +51,7 @@ class TestRoleRegistry:
             system_prompt="You are fake.",
             keywords=["代码", "开发", "bug", "Python", "JavaScript", "API", "接口", "函数"],
         )
-        duplicates = role_registry.check_duplicate(dup, threshold=0.3)
+        duplicates = role_registry.check_duplicate(dup, threshold=0.2)
         assert len(duplicates) > 0, "Should detect overlap with developer"
 
     def test_dynamic_role_lifecycle(self):

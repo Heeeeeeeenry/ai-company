@@ -75,7 +75,11 @@ def _quick_reply(task: str) -> str:
         return "再见！有需要随时找我 👋"
     if re.match(r"^[哦嗯啊哈嘿哎咦哟]{1,3}[！!]*$", t):
         return "😄"
-    return "有什么我可以帮你的吗？输入 /help 查看我能做什么。"
+    if any(w in t for w in ["放屁", "扯淡", "胡说", "瞎说", "傻", "笨", "蠢", "弱智", "垃圾"]):
+        return "别急，我在。你要么直接说哪儿答错了，要么把你想要的结果丢给我，我马上改。"
+    if any(w in t for w in ["哈哈", "牛逼", "666", "太棒", "厉害", "真的假的"]):
+        return "收到，继续。你要我接着干哪一段？"
+    return "我在，直接说事。"
 
 
 def _extract_wechat_send_request(task: str) -> Optional[tuple]:
@@ -184,6 +188,7 @@ class TriageSimulator:
         (r"^(?:现在)?几点(?:了|钟)?$", "TIME_HOUR"),
         (r"^今天(?:是)?星期(?:几|什么)$", "WEEKDAY"),
         (r"^(?:现在|当前)(?:是)?(?:几月|几月份|什么月)$", "MONTH"),
+        (r"^后天(?:的)?(?:阴历|农历)(?:日期)?(?:是)?(?:多少|什么)?$", "LUNAR_DAY_AFTER_TOMORROW"),
     ]
 
     # ── Trivial exact matches ──
@@ -492,6 +497,7 @@ TEST_QUERIES = [
     ("今天星期几", "1", "系统查询-星期几"),
     ("现在是几月", "1", "系统查询-几月"),
     ("现在几点", "1", "系统查询-几点"),
+    ("后天的阴历日期是多少", "1", "系统查询-后天阴历"),
 
     # ── Branch 2: Trivial exact + len<=2 (8个) ──
     ("help", "2", "trivial exact-help"),
@@ -518,6 +524,8 @@ TEST_QUERIES = [
     ("666", "4", "短数字感叹"),
     ("真的假的", "4", "短疑问-无关键词"),
     ("太棒了", "4", "短赞美"),
+    ("放屁", "4", "短粗口"),
+    ("狗蛋变傻了", "4", "短负反馈"),
 
     # ── Branch 5: Memory lookup (4个) ──
     ("最近聊天记录", "5", "memory lookup-最近聊天"),

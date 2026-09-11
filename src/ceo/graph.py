@@ -54,6 +54,8 @@ class CEOState(TypedDict):
     arch_design: Optional[str]                 # Architect's design output
     workspace_id: Optional[str]                # Task workspace ID for context sharing
     task_type: Optional[str]                   # COMMAND_EXECUTION|SIMPLE_QUERY|RESEARCH|CODING|DOCUMENT|CREATIVE|GENERAL
+    model_tier: Optional[str]                  # "tiny"|"standard"|"premium" — model cost/quality tier
+    skill_context: Optional[str]               # loaded skill body for domain-specific queries (e.g. TCM)
     memory_mode: Optional[bool]                # Direct memory recall, skip department pipeline
     hierarchical_plan: Optional[dict]           # P1.2: HierarchicalPlan serialized (goal, phases, current_phase)
     phase_outputs: Annotated[list, operator.add]  # P1.2: accumulated outputs from each phase
@@ -498,6 +500,15 @@ def _safe_node(name: str):
     return decorator
 
 
+def _load_skill_context(user_request: str) -> Optional[str]:
+    """Detect domain-specific skills and load their context for injection."""
+    try:
+        from src.skills import detect_and_load
+        return detect_and_load(user_request or "")
+    except Exception:
+        return None
+
+
 @_safe_node("Triage")
 async def triage_node(state: CEOState) -> dict:
     """Node function."""
@@ -630,7 +641,7 @@ async def triage_node(state: CEOState) -> dict:
             # Query is short and doesn't match any known pattern.
             # Use lightweight LLM instead of canned reply — always gets a real answer.
             try:
-                llm = _get_llm("ceo")
+                llm = _get_llm("ceo", model_tier=state.get("model_tier", "standard"))
                 reply = llm.invoke(f"用中文简短回答（1-2句）：{task}").content
                 if reply and reply.strip():
                     return {
@@ -671,7 +682,7 @@ async def triage_node(state: CEOState) -> dict:
     
     from src.departments.roles import role_registry
 
-    llm = _get_llm("ceo")
+    llm = _get_llm("ceo", model_tier=state.get("model_tier", "standard"))
     agent_state = get_agent_state("ceo")
     agent_state.set_task(state["user_request"])
     
@@ -1130,25 +1141,28 @@ async def triage_node(state: CEOState) -> dict:
         f"Match: {match_method}"
     )
     
-    # ═══ V5 IntentRouter: detailed intent classification (for logging only) ═══
-    # Skip for fast-path departments (keyword-matched) — only needed for LLM-fallback cases.
+    # ═══ V5 IntentRouter: detailed intent classification + model tier routing ═══
     user_req = state.get("user_request", "")
-    if match_method.startswith("LLM") or match_method.startswith("Fallback"):
-        try:
-            from src.intent import IntentRouter
-            intent_router = IntentRouter()
-            v5_result = intent_router.classify(user_req)
-            intent_detail = f"intent={v5_result.intent} conf={v5_result.confidence:.2f} via={v5_result.matched_by}"
-        except Exception:
-            intent_detail = "V5 intent unavailable"
-    else:
-        intent_detail = f"V5 skipped (fast-path: {match_method})"
+    model_tier = "standard"   # default
+    intent_detail = ""
+    try:
+        from src.intent import IntentRouter
+        intent_router = IntentRouter()
+        v5_result = intent_router.classify(user_req)
+        model_tier = v5_result.model_tier
+        intent_detail = f"intent={v5_result.intent} conf={v5_result.confidence:.2f} via={v5_result.matched_by} tier={model_tier}"
+    except Exception:
+        intent_detail = "V5 intent unavailable"
+        if match_method.startswith("LLM") or match_method.startswith("Fallback"):
+            intent_detail = "V5 intent unavailable (LLM fallback)"
     
     return {
         "phase": next_phase,
         "department": department,
         "workspace_id": workspace_id,
         "task_type": classify_task(state.get("user_request", ""), department),
+        "model_tier": model_tier,
+        "skill_context": _load_skill_context(state.get("user_request", "")),
         "execution_log": [f"[TRIAGE] {match_method} -> {department} | {intent_detail}"],
     }
 
@@ -1325,7 +1339,7 @@ async def pm_analyze_node(state: CEOState) -> dict:
     from src.departments.roles import role_registry
 
     pm_role = role_registry.get("pm")
-    llm = _get_llm("pm")
+    llm = _get_llm("pm", model_tier=state.get("model_tier", "standard"))
 
     # Task type classification (zero extra LLM calls)
     task_type = _classify_task_type(state)
@@ -1418,7 +1432,7 @@ async def architect_node(state: CEOState) -> dict:
             "execution_log": ["[Arch] No architect role, skipping"],
         }
 
-    llm = _get_llm("architect")
+    llm = _get_llm("architect", model_tier=state.get("model_tier", "standard"))
     prd = state.get("prd", {})
     user_request = state.get("user_request", "")
 
@@ -2416,7 +2430,15 @@ async def deliver_node(state: CEOState) -> dict:
         if records:
             lines = ["## 记忆中的对话\n"]
             for i, r in enumerate(records, 1):
-                text = getattr(r, 'raw_text', r.get('text', '')) if hasattr(r, 'raw_text') or hasattr(r, 'get') else str(r)
+                # r may be a dict, a MemoryRecord-like object, or a plain string.
+                # Never evaluate r.get(...) as a getattr default because defaults
+                # are evaluated eagerly and MemoryRecord does not implement get().
+                if hasattr(r, "raw_text"):
+                    text = getattr(r, "raw_text", "")
+                elif isinstance(r, dict):
+                    text = r.get("text") or r.get("raw_text") or r.get("content") or ""
+                else:
+                    text = str(r)
                 if text:
                     lines.append(f"{i}. {text}")
             state["final_output"] = "\n".join(lines)
@@ -2900,6 +2922,12 @@ def _inject_session_context(state: dict) -> None:
     except Exception:
         logger.error("hermes_memory unavailable — context injection skipped", exc_info=True)
         hermes_ctx = ""
+
+    # ── Agent Skill Context (domain-specific knowledge, e.g. TCM) ──
+    skill_ctx = state.get("skill_context", "")
+    if skill_ctx:
+        hermes_ctx = (hermes_ctx + "\n\n" + skill_ctx).strip()
+        logger.debug("Skill context injected (%d chars)", len(skill_ctx))
 
     # ── Recent conversation turns (compact, last 5) ──
     history_text = ""

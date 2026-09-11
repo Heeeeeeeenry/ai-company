@@ -640,7 +640,15 @@ class ExecutionRouter:
                         'Format: {\"action\":\"final\",\"output\":\"your summary with data\"}'
                     )
                 ))
-            response = await llm.ainvoke(messages)
+            try:
+                response = await asyncio.wait_for(
+                    llm.ainvoke(messages),
+                    timeout=120.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error("LLM ainvoke timed out after 120s for %s, iteration %d",
+                             department, iteration)
+                raise
             raw = str(response.content)
 
             # Parse LLM response

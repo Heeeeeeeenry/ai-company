@@ -1,7 +1,19 @@
 # MEMORY.md — AI-Company 项目记忆
 
-> 最后更新: 2026-06-30
+> 最后更新: 2026-07-02
 > 项目路径: `~/openclaw/workspace/ai-company/`
+
+## 最近重大改动 (2026-07-02)
+
+### 薄CEO + Escalation 回路架构
+- **新建 `src/ceo/dispatcher.py`** — 薄CEO调度中心 (~400行)
+  - 三步流程: quick_triage → role_match → dispatch
+  - escalation 回路: 角色搞不定→CEO重新匹配→重新分派(最多2轮)
+  - 复杂任务自动走PM规划，简单任务直接分派
+  - 兜底: 2轮后fallback到developer
+- **`src/ceo/graph.py`** — run_ceo 改为委托 dispatcher, 保留 run_ceo_legacy
+- **角色匹配全面升级** — 两阶段域匹配 + 通用关键词清洗 + 混合评分 + tie-breaking
+- **233个动态角色不再全量匹配** — 先域检测(17类) → 域内评分, 候选池从239降到10-30
 
 ## 项目概述
 一个 12-agent 多智能体虚拟公司系统，CEO 编排 + LangGraph 工作流 + 打分门禁。

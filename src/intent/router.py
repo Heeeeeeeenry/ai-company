@@ -58,7 +58,32 @@ class IntentResult:
     params: dict = field(default_factory=dict)   # extracted parameters (e.g. {"command": "ls -la"})
     routing_hint: str = ""        # suggested agent name
     matched_by: str = "keyword"   # "keyword" or "llm"
+    model_tier: str = "standard"  # "tiny"|"standard"|"premium" — model cost/quality tier
 
+
+# ─── Intent → Model Tier Mapping ───────────────────────────────────
+# tier: tiny → cheapest model, standard → default, premium → best reasoning
+#
+# Controlled by environment variables:
+#   MODEL_TINY=DeepSeek-V4-Flash     (default)
+#   MODEL_STANDARD=gpt-5.5           (default)
+#   MODEL_PREMIUM=DeepSeek-V4-Pro    (default)
+
+INTENT_TO_TIER: dict[str, str] = {
+    "COMMAND":      "tiny",       # shell commands — simple, deterministic
+    "SYSTEM":       "tiny",       # system ops — simple
+    "FILE":         "tiny",       # file ops — simple
+    "GENERAL_CHAT": "tiny",       # greetings/small talk — trivial
+    "SEARCH":       "standard",   # information lookup — moderate
+    "MEMORY":       "standard",   # memory queries — moderate
+    "SOCIAL":       "standard",   # messaging — moderate
+    "VISION":       "standard",   # vision uses Qwen-VL separately, tier irrelevant
+    "CREATIVE":     "standard",   # copywriting — moderate
+    "AUTOMATION":   "standard",   # scheduled tasks — moderate
+    "RESEARCH":     "premium",    # deep analysis — needs best model
+    "CODING":       "premium",    # code generation — needs best model
+    "CODE_REVIEW":  "premium",    # code audit — needs best model
+}
 
 # ─── Intent → old task_type mapping (backward compat) ─────────────
 
@@ -170,7 +195,16 @@ class IntentRouter:
 
     Layer 1: regex keyword fast-path, 0 LLM cost.
     Layer 2: LLM classification via deepseek-chat for ambiguous inputs.
+
+    Model tier assignment:
+      Each intent is mapped to a model tier (tiny/standard/premium)
+      to optimize cost-performance. See INTENT_TO_TIER.
     """
+
+    @staticmethod
+    def _get_tier(intent: str) -> str:
+        """Look up the recommended model tier for an intent."""
+        return INTENT_TO_TIER.get(intent, "standard")
 
     def __init__(self, llm_model: str = "deepseek-chat"):
         """Initialize the router.
@@ -203,6 +237,7 @@ class IntentRouter:
                 confidence=1.0,
                 routing_hint="",
                 matched_by="keyword",
+                model_tier=self._get_tier("GENERAL_CHAT"),
             )
 
         text_clean = text.strip()
@@ -236,6 +271,7 @@ class IntentRouter:
                     params=params,
                     routing_hint=hint,
                     matched_by="keyword",
+                    model_tier=self._get_tier(intent),
                 )
 
         # ── Layer 2: LLM classification ──
@@ -255,6 +291,7 @@ class IntentRouter:
                     confidence=0.5,
                     routing_hint="",
                     matched_by="llm",
+                    model_tier=self._get_tier("GENERAL_CHAT"),
                 )
 
             prompt = _build_llm_classify_prompt(text)
@@ -274,6 +311,7 @@ class IntentRouter:
                 confidence=confidence,
                 routing_hint=_default_hint(intent),
                 matched_by="llm",
+                model_tier=self._get_tier(intent),
             )
 
         except ImportError:
@@ -283,6 +321,7 @@ class IntentRouter:
                 confidence=0.3,
                 routing_hint="",
                 matched_by="llm",
+                model_tier=self._get_tier("GENERAL_CHAT"),
             )
         except Exception as e:
             logger.warning("LLM classification failed: %s, falling back to GENERAL_CHAT", e)
@@ -291,6 +330,7 @@ class IntentRouter:
                 confidence=0.3,
                 routing_hint="",
                 matched_by="llm",
+                model_tier=self._get_tier("GENERAL_CHAT"),
             )
 
 
