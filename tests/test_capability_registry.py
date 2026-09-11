@@ -48,11 +48,15 @@ def test_capability_fields():
 
     coding = capability_registry.get("coding")
     assert coding.agent == "CodingAgent"
-    assert "patch" in coding.tools
+    # patch/terminal 执行层不存在，已从 coding 能力移除
+    assert "run_python" in coding.tools
+    assert "run_test" in coding.tools
+    assert "lint_code" in coding.tools
 
     vision = capability_registry.get("vision")
     assert vision.agent == "VisionAgent"
-    assert "screenshot" in vision.tools
+    # vision_analyze/screenshot 执行层不存在，已清空 tools（视觉走独立 /vision 子系统）
+    assert vision.tools == []
 
     print("[PASS] test_capability_fields — individual fields verified")
 
@@ -97,7 +101,7 @@ def test_intent_resolution_all():
         "SEARCH": ["web_search"],
         "RESEARCH": ["web_search", "file_io"],
         "VISION": ["vision"],
-        "SOCIAL": ["wechat", "vision"],
+        "SOCIAL": ["wechat"],  # 微信社交仅发消息，vision 不走执行层工具
         "MEMORY": ["memory"],
         "CODING": ["coding", "filesystem", "web_search"],
         "SYSTEM": ["shell", "filesystem"],
@@ -173,9 +177,11 @@ def test_get_tools_for_intent():
     assert research_tools == {"web_search", "web_fetch", "market_series", "read_file", "write_file"}
 
     coding_tools = capability_registry.get_tools_for_intent("CODING")
-    assert "patch" in coding_tools
-    assert "terminal" in coding_tools
-    assert "list_dir" in coding_tools
+    # coding → read_file/write_file/run_python/run_test/lint_code/git_commit
+    # (patch/terminal 执行层不存在，已从 coding 能力移除)
+    assert "run_python" in coding_tools
+    assert "read_file" in coding_tools
+    assert "list_dir" in coding_tools  # filesystem capability
     # web_search and coding share some tools — dedup should handle it
 
     chat_tools = capability_registry.get_tools_for_intent("GENERAL_CHAT")
@@ -198,7 +204,6 @@ def test_export_tools_config():
     assert "market_series" in config["ResearchAgent"]
 
     # CodingAgent gets tools from coding + vcs
-    assert "patch" in config["CodingAgent"]
     assert "git_commit" in config["CodingAgent"]
 
     print("[PASS] test_export_tools_config — compatible with ROLE_TOOLS format")
@@ -210,7 +215,6 @@ def test_resolve_tools_compat():
     assert "read_file" in tools
     assert "write_file" in tools
     assert "run_python" in tools
-    assert "patch" in tools
     assert "git_commit" in tools
     # No duplicates
     assert len(tools) == len(set(tools))

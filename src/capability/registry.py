@@ -94,27 +94,27 @@ DEFAULT_CAPABILITIES: dict[str, Capability] = {
     ),
     "vision": Capability(
         name="vision",
-        description="图像分析和UI理解",
+        description="图像分析和UI理解 (占位 — 视觉子系统走独立API，未接入执行层工具)",
         agent="VisionAgent",
-        tools=["vision_analyze", "screenshot"],
+        tools=[],  # 执行层无 vision_analyze/screenshot 工具，清空避免 Unknown tool
     ),
     "shell": Capability(
         name="shell",
-        description="Shell命令执行",
+        description="Shell命令执行 (映射到 run_python)",
         agent="SystemAgent",
-        tools=["run_command"],
+        tools=["run_python"],  # 原 run_command 执行层不存在，改用 run_python
     ),
     "wechat": Capability(
         name="wechat",
-        description="微信消息收发",
+        description="微信消息发送",
         agent="WechatAgent",
-        tools=["wechat_send", "wechat_read"],
+        tools=["wechat_send"],  # wechat_read(收消息)执行层未实现，移除
     ),
     "coding": Capability(
         name="coding",
         description="代码编写和调试",
         agent="CodingAgent",
-        tools=["read_file", "write_file", "run_python", "patch", "terminal"],
+        tools=["read_file", "write_file", "run_python", "run_test", "lint_code", "git_commit"],  # 原 patch/terminal 执行层无，移除
     ),
     "file_io": Capability(
         name="file_io",
@@ -130,15 +130,15 @@ DEFAULT_CAPABILITIES: dict[str, Capability] = {
     ),
     "browser": Capability(
         name="browser",
-        description="浏览器自动化",
+        description="浏览器自动化 (占位 — 执行层未实现)",
         agent="BrowserAgent",
-        tools=["browser_navigate", "browser_click"],
+        tools=[],  # 执行层无 browser_navigate/browser_click，清空
     ),
     "memory": Capability(
         name="memory",
-        description="跨会话记忆",
+        description="跨会话记忆 (占位 — 记忆经 engram/session 后端，非工具调用)",
         agent="MemoryAgent",
-        tools=["memory_search", "memory_save"],
+        tools=[],  # 执行层无 memory_search/memory_save，清空
     ),
     "market_data": Capability(
         name="market_data",
@@ -169,9 +169,9 @@ INTENT_CAPABILITY_MAP: dict[str, list[str]] = {
     "COMMAND": ["shell"],
     "SEARCH": ["web_search"],
     "RESEARCH": ["web_search", "file_io"],
-    "VISION": ["vision"],
-    "SOCIAL": ["wechat", "vision"],
-    "MEMORY": ["memory"],
+    "VISION": ["vision"],  # 视觉能力定义保留，tools 为空 → 不产生执行层工具
+    "SOCIAL": ["wechat"],
+    "MEMORY": ["memory"],  # 记忆能力定义保留，tools 为空 → 不产生执行层工具
     "CODING": ["coding", "filesystem", "web_search"],
     "SYSTEM": ["shell", "filesystem"],
     "FILE": ["file_io"],

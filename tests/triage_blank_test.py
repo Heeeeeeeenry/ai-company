@@ -145,35 +145,6 @@ def _extract_wechat_send_request(task: str) -> Optional[tuple]:
     return None
 
 
-def _extract_wechat_conversation_request(task: str) -> Optional[tuple]:
-    """Extract (contact, max_turns, initiate) from natural-language conversation requests."""
-    task = (task or "").strip()
-    if not task or not re.search(
-        r"聊天|回复|代聊|帮我.*聊|替.*回复|聊几句|自动回复|闲聊|聊聊天|聊聊|唠唠",
-        task, re.IGNORECASE
-    ):
-        return None
-
-    initiate = bool(re.search(r"闲聊|聊聊天|聊聊|主动|随便聊|唠唠", task))
-    max_turns = None
-    turns_match = re.search(r"(\d+)\s*(?:轮|句|次|个来回)", task)
-    if turns_match:
-        max_turns = int(turns_match.group(1))
-
-    contact_patterns = [
-        r"(?:帮|替)\s*(?:我\s*)?(?:跟|和|回复)\s*([^\s，。:：\d聊代闲随便唠]+)",
-        r"(?:跟|和|用微信和|用微信跟)\s*([^\s，。:：\d聊代闲随便唠]+?)\s*(?:聊天|聊几句|闲聊|聊聊|聊聊天|随便聊聊|唠唠|自动回复|$)",
-        r"(?:回复|代聊)\s*([^\s，。:：\d聊代闲随便唠]+)",
-    ]
-    for pattern in contact_patterns:
-        match = re.search(pattern, task, re.IGNORECASE)
-        if match:
-            contact = _strip_wrapping_quotes(match.group(1))
-            if contact:
-                return contact.strip(), max_turns, initiate
-    return None
-
-
 # ═══════════════════════════════════════════════════════════
 # 模拟 triage_node 规则路由（不调 LLM）
 # ═══════════════════════════════════════════════════════════
@@ -419,19 +390,6 @@ class TriageSimulator:
                 "detail": "memory_mode=True，无 final_output → 空白",
             }
 
-        # ── Branch 6: WeChat conversation (跳过实际执行，仅检测匹配) ──
-        conv = _extract_wechat_conversation_request(task)
-        if conv:
-            contact, max_turns, initiate = conv
-            return {
-                "branch": "6-WeChatConversation",
-                "final_output": f"（模拟）与{contact}对话完成",
-                "is_blank": False,
-                "phase": "deliver",
-                "department": "devops",
-                "detail": f"微信对话: {contact}, initiate={initiate}, turns={max_turns or 3}",
-            }
-
         # ── Branch 7: WeChat send ──
         wc = _extract_wechat_send_request(task)
         if wc:
@@ -532,12 +490,6 @@ TEST_QUERIES = [
     ("回顾之前的对话", "5", "memory lookup-回顾对话"),
     ("列出最近的记忆", "5", "memory lookup-列出记忆"),
     ("总结刚才聊了什么", "5", "memory lookup-总结刚才"),
-
-    # ── Branch 6: WeChat conversation (4个) ──
-    ("帮我跟张三聊天", "6", "微信对话-帮聊"),
-    ("跟李四聊聊天", "6", "微信对话-主动闲聊"),
-    ("替我跟王五聊几句", "6", "微信对话-聊几句"),
-    ("用微信和刘六闲聊", "6", "微信对话-用微信闲聊"),
 
     # ── Branch 7: WeChat send (4个) ──
     ("微信给小明发消息说今天开会", "7", "微信发送-给X发"),

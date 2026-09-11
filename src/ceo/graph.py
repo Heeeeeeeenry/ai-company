@@ -316,47 +316,6 @@ def _extract_wechat_send_request(task: str) -> Optional[tuple[str, str]]:
     return None
 
 
-def _extract_wechat_conversation_request(task: str) -> Optional[tuple[str, Optional[int], bool]]:
-    """Extract (contact, max_turns, initiate) from natural-language conversation/reply requests.
-    
-    Matches:
-      Passive: "帮我跟XX聊天" / "代聊XX 3轮" / "替我回复XX"
-      Active: "和XX闲聊几句" / "跟XX聊聊天" / "用微信和XX聊聊"
-    
-    initiate=True: AI should send an opening message first, then listen.
-    """
-    task = (task or "").strip()
-    if not task or not re.search(r"聊天|回复|代聊|帮我.*聊|替.*回复|聊几句|自动回复|闲聊|聊聊天|聊聊|唠唠", task, re.IGNORECASE):
-        return None
-    
-    # Detect active initiation keywords
-    initiate = bool(re.search(r"闲聊|聊聊天|聊聊|主动|随便聊|唠唠", task))
-    
-    # Extract max_turns
-    max_turns = None
-    turns_match = re.search(r"(\d+)\s*(?:轮|句|次|个来回)", task)
-    if turns_match:
-        max_turns = int(turns_match.group(1))
-    
-    # Extract contact name (闲随便唠 excluded to prevent capture leakage)
-    contact_patterns = [
-        # "帮我跟XX聊天" / "替我回复XX" / "帮我回复XX"
-        r"(?:帮|替)\s*(?:我\s*)?(?:跟|和|回复)\s*([^\s，。:：\d聊代闲随便唠]+)",
-        # "跟XX聊天" / "和XX聊几句" / "用微信和XX闲聊/随便聊聊/唠唠"
-        r"(?:跟|和|用微信和|用微信跟)\s*([^\s，。:：\d聊代闲随便唠]+?)\s*(?:聊天|聊几句|闲聊|聊聊|聊聊天|随便聊聊|唠唠|自动回复|$)",
-        # "回复XX" / "代聊XX 3轮"
-        r"(?:回复|代聊)\s*([^\s，。:：\d聊代闲随便唠]+)",
-    ]
-    for pattern in contact_patterns:
-        match = re.search(pattern, task, re.IGNORECASE)
-        if match:
-            contact = _strip_wrapping_quotes(match.group(1))
-            if contact:
-                return contact.strip(), max_turns, initiate
-    
-    return None
-
-
 def _debug_report(hypothesis_id: str, location: str, msg: str, data: Optional[dict] = None) -> None:
     # #region debug-point A:wechat-triage-report
     env_path = ".dbg/wechat-send-fail.env"
@@ -688,65 +647,7 @@ async def triage_node(state: CEOState) -> dict:
     
     # ═══ WeChat Send Fast-Path: direct execution, no agent loop ═══
     # task already defined above with .strip()
-    
-    # ─── Conversation Fast-Path (AI-powered chat) ───
-    conv_request = _extract_wechat_conversation_request(task)
-    if conv_request:
-        contact, max_turns, initiate = conv_request
-        max_turns = max_turns or 3  # default 3 turns
-        try:
-            from src.wechat.conversation import ConversationManager
-            mgr = ConversationManager(contact)
-            
-            if initiate:
-                # Active mode: send an opening message first, then listen
-                logger = __import__('logging').getLogger("ai_company")
-                logger.info("Active conversation: sending opening message to %s", contact)
-                opener = mgr._generate_opener()
-                if opener:
-                    logger.info("Opening: %s", opener[:60])
-                    opener_result = mgr.send(opener)
-                    if opener_result.get("success"):
-                        mgr.history.append({
-                            "sender": "me",
-                            "content": opener,
-                            "time": __import__('datetime').datetime.now().isoformat(),
-                        })
-            
-            replies = mgr.run(turns=max_turns, poll_interval=3.0)
-            
-            # Build detailed summary
-            sent = [r for r in replies if r["sent"]]
-            failed = [r for r in replies if not r["sent"]]
-            
-            parts = [f"与{contact}对话完成"]
-            if sent:
-                parts.append(f"已发送{len(sent)}条")
-                for r in sent:
-                    parts.append(f"  ✓ {r['text'][:40]}")
-            if failed:
-                parts.append(f"生成但发送失败{len(failed)}条")
-                for r in failed:
-                    parts.append(f"  ✗ {r['text'][:40]} ({r.get('error','?')})")
-            if not replies:
-                parts.append("无新消息需要回复")
-            
-            reply_summary = "\n".join(parts)
-            return {
-                "phase": "deliver",
-                "department": "devops",
-                "task_type": "LOCAL_SYSTEM",
-                "final_output": reply_summary,
-                "score_card": {"score": 95, "decision": "APPROVE", "final_score": 95,
-                              "next_action": "deliver"},
-                "execution_log": [f"[TRIAGE] Conversation fast-path: {contact}, {len(sent)} sent, {len(failed)} failed"],
-            }
-        except Exception as e:
-            import logging
-            logging.getLogger("ai_company").warning(
-                "Conversation fast-path failed, falling back: %s", e,
-            )
-    
+
     wechat_request = _extract_wechat_send_request(task)
     _debug_report(
         "A",
