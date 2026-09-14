@@ -1256,6 +1256,73 @@ def _cmd_vision(console, user_input, current_session):
 
 # ─── Entry Point ────────────────────────────────
 
+def _run_async(coro):
+    """Run an async coroutine with a clean loop shutdown.
+
+    ``asyncio.run()`` closes the event loop immediately on exit, but any
+    subprocess transport created via ``asyncio.create_subprocess_*`` (e.g. the
+    executor's tool calls) that isn't yet awaited will raise
+    ``RuntimeError: Event loop is closed`` in its ``__del__`` at GC.  We do two
+    things to keep that benign noise out of the console:
+
+    1. Cancel + gather pending tasks, and close subprocess transports, BEFORE
+       closing the loop.
+    2. Install an ``unraisablehook`` that swallows the harmless
+       ``RuntimeError: Event loop is closed`` raised from ``__del__`` when a
+       subprocess transport is garbage-collected after the loop is closed.
+    """
+    # Suppress the benign "Event loop is closed" from subprocess __del__ at GC.
+    _default_unraisable = sys.unraisablehook
+    def _swallow_closed_loop(args):
+        err = args.exc_value
+        if isinstance(err, RuntimeError) and "Event loop is closed" in str(err):
+            return
+        _default_unraisable(args)
+    sys.unraisablehook = _swallow_closed_loop
+
+    # Also quiet the benign "[asyncio] WARNING: Loop ... is closed" log emitted
+    # when a subprocess transport outlives loop.close().
+    import logging as _logging
+    _asyncio_logger = _logging.getLogger("asyncio")
+    _asyncio_logger.setLevel(_logging.ERROR)
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            # Cancel + gather pending tasks so subprocess transports are reaped
+            # while the loop is still alive, preventing "Event loop is closed"
+            # on GC after loop.close().
+            pending = asyncio.all_tasks(loop)
+            for t in pending:
+                t.cancel()
+            if pending:
+                try:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True)
+                    )
+                except Exception:
+                    pass
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
+        asyncio.set_event_loop(None)
+        # Do NOT restore the asyncio logger level here: in CLI mode the process
+        # exits right after this, and restoring lets the benign
+        # "[asyncio] WARNING: Loop ... is closed" (from a subprocess transport
+        # GC'd after loop.close()) print on shutdown. Keeping it at ERROR keeps
+        # that one line of noise out. Other asyncio.run() call sites (telegram,
+        # one-shot) use asyncio.run() and are unaffected by this wrapper.
+
+
 def main():
     parser = argparse.ArgumentParser(description="AI Company - Multi-Agent System")
     parser.add_argument(
@@ -1340,7 +1407,7 @@ def main():
             
             asyncio.run(one_shot())
         else:
-            asyncio.run(run_cli())
+            _run_async(run_cli())
     else:
         # Telegram mode
         if not config.telegram_bot_token:

@@ -33,11 +33,19 @@ def _cleanup_all_mcp():
     1. No event loop running → create one with asyncio.run()
     2. Event loop already running (e.g. inside async context manager) →
        kill subprocesses directly since we can't await from sync atexit.
+
+    NOTE: when the main ``asyncio.run()`` loop has already closed, we must NOT
+    spawn a fresh loop via asyncio.run() to shut MCP clients down — the client
+    subprocess transports were created on the now-closed loop, so awaiting them
+    from a new loop raises ``RuntimeError: Event loop is closed`` at GC.  In
+    that case we fall through to direct synchronous kill.
     """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop — safe to use asyncio.run
+        # No running loop.  A *closed* loop also raises here, so distinguish:
+        # if the previous loop is closed we can't await transports from a new
+        # one — kill synchronously instead.
         async def _shutdown_all():
             for client in list(_active_mcp_clients):
                 try:
@@ -50,16 +58,39 @@ def _cleanup_all_mcp():
         except Exception:
             import logging
             logging.getLogger("ai_company.mcp").debug("atexit cleanup failed", exc_info=True)
+            _kill_mcp_subprocesses()
     else:
-        # Loop already running — do best-effort sync cleanup
-        for client in list(_active_mcp_clients):
-            for name, proc in list(client._servers.items()):
-                try:
-                    proc.kill()
-                except Exception:
-                    import logging
-                    logging.getLogger("ai_company.mcp").debug("kill failed", exc_info=True)
-            client._servers.clear()
+        # Loop still running — do best-effort sync cleanup
+        _kill_mcp_subprocesses()
+
+
+def _kill_mcp_subprocesses():
+    """Synchronously kill MCP server subprocesses (safe on a closed loop)."""
+    for client in list(_active_mcp_clients):
+        for name, proc in list(client._servers.items()):
+            try:
+                proc.kill()
+            except Exception:
+                import logging
+                logging.getLogger("ai_company.mcp").debug("kill failed", exc_info=True)
+        client._servers.clear()
+
+
+def _close_proc_transport(proc) -> None:
+    """Best-effort close of an asyncio subprocess transport.
+
+    ``asyncio.create_subprocess_*`` leaves the transport bound to the event
+    loop; if it is not explicitly closed before ``loop.close()``, the
+    ``__del__`` of ``BaseSubprocessTransport`` raises
+    ``RuntimeError: Event loop is closed`` at GC on exit.  Closing the
+    transport here (right after the subprocess finishes) prevents that noise.
+    """
+    try:
+        transport = getattr(proc, "_transport", None)
+        if transport is not None and not transport.is_closing():
+            transport.close()
+    except Exception:
+        pass
 
 
 atexit.register(_cleanup_all_mcp)
@@ -328,6 +359,10 @@ class CLIExecutor:
                 proc.communicate(), timeout=timeout
             )
 
+            # Close the subprocess transport so GC after loop.close() doesn't
+            # raise "RuntimeError: Event loop is closed" on exit.
+            _close_proc_transport(proc)
+
             return ToolResult(
                 success=proc.returncode == 0,
                 output=stdout.decode("utf-8", errors="replace"),
@@ -341,6 +376,7 @@ class CLIExecutor:
                     await proc.wait()
                 except Exception:
                     pass
+            _close_proc_transport(proc)
             return ToolResult(False, "", "Command timed out", ExecutionMode.CLI)
         except asyncio.CancelledError:
             # User interrupted — kill subprocess and re-raise
@@ -350,6 +386,7 @@ class CLIExecutor:
                     await proc.wait()
                 except Exception:
                     pass
+            _close_proc_transport(proc)
             raise
         except Exception as e:
             if proc and proc.returncode is None:
@@ -357,6 +394,7 @@ class CLIExecutor:
                     proc.kill()
                 except Exception:
                     pass
+            _close_proc_transport(proc)
             return ToolResult(False, "", str(e), ExecutionMode.CLI)
 
     # SECURITY: shell=True used only for TOOL_REGISTRY pre-defined commands.
