@@ -328,6 +328,51 @@ async def _plan_complex_task(task: str) -> dict:
         return {"summary": task[:100], "features": [], "acceptance_criteria": []}
 
 
+# ─── Session Context Injection ────────────────────────
+
+def _build_session_context() -> str:
+    """Assemble the current session's recent conversation + memory for injection.
+
+    The thin-dispatcher path does NOT go through the legacy LangGraph
+    ``_inject_session_context`` (that only runs in run_ceo_legacy), so the CEO
+    and downstream roles would otherwise have no visibility of the current
+    session's history.  Injecting it here keeps cross-session isolation (only
+    the *current* session's data) while giving the assistant the context it
+    needs to answer questions like "李恒是谁" after it was entered earlier in
+    the same session.
+    """
+    try:
+        from src.session import get_session_manager
+        from src.session.memory import get_session_memory
+        mgr = get_session_manager()
+        if not mgr.current:
+            return ""
+        mem = get_session_memory(mgr.current.id)
+        parts = []
+
+        # Structured session memories (key facts, e.g. from auto-summarize)
+        all_mem = mem.all()
+        if all_mem:
+            lines = [f"- {k}: {str(v)[:200]}" for k, v in all_mem.items()]
+            parts.append("## 当前会话记忆\n" + "\n".join(lines))
+
+        # Recent conversation turns (last 10)
+        convs = mem.get_recent_conversations(10)
+        if convs:
+            turns = []
+            for c in convs:
+                u = str(c.get("user", ""))[:300]
+                a = str(c.get("assistant", ""))[:200]
+                turns.append(f"用户: {u}\n助手: {a}")
+            parts.append("## 当前会话最近对话\n" + "\n".join(turns))
+
+        if not parts:
+            return ""
+        return "\n\n".join(parts)
+    except Exception:
+        return ""
+
+
 # ─── Main Entry Point ───────────────────────────────
 
 async def run_ceo(user_message: str) -> dict:
@@ -356,6 +401,9 @@ async def run_ceo(user_message: str) -> dict:
 
     # ── Step 3: Complex? Plan first ──
     mode, context = "direct", ""
+    # Always seed with the current session's history so roles can see earlier
+    # turns of THIS session (thin dispatcher doesn't inject it otherwise).
+    sess_ctx = _build_session_context()
     if _is_complex_task(task) and role_name in ("developer", "qa"):
         try:
             plan = await _plan_complex_task(task)
@@ -369,6 +417,9 @@ async def run_ceo(user_message: str) -> dict:
             mode = "planned"
         except Exception:
             logger.warning("Planning failed → direct", exc_info=True)
+
+    if sess_ctx:
+        context = (context + "\n\n" if context else "") + sess_ctx
 
     # ── Step 4: Dispatch with escalation ──
     result = await _escalation_loop(task, role_name, context)
