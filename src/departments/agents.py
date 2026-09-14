@@ -278,6 +278,20 @@ class DepartmentAgent:
         # Tool-specific guidance based on role
         tool_guidance = self._get_tool_guidance()
 
+        # When real context is supplied (session history / PM plan / artifacts),
+        # instruct the model to PREFER it over re-searching — this keeps facts
+        # the user entered earlier in the session authoritative.
+        has_ctx = bool(context and context.strip())
+        ctx_priority = (
+            "\nIMPORTANT: Relevant context is provided above. Use it as the "
+            "authoritative source for questions it answers — do NOT re-run "
+            "web_search for facts already present in the context (e.g. "
+            "information the user stated earlier in this session). Only search "
+            "the web for facts NOT covered by the provided context."
+            if has_ctx
+            else ""
+        )
+
         return f"""{self.role.system_prompt}
 
 ## Execution Context
@@ -289,6 +303,7 @@ Your available tools: {tools_str}
 
 Context from CEO/PM:
 {context if context else "No additional context provided."}
+{ctx_priority}
 
 IMPORTANT: You have REAL tools. If Known data sources are provided, use web_fetch on them directly. Otherwise call web_search. Only use action=final when you have actual data."""
 
