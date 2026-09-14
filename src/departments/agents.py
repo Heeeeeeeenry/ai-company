@@ -120,10 +120,13 @@ class DepartmentAgent:
     Outputs are auto-saved as artifacts for follow-up queries.
     """
 
-    # Default workspace for project work (configurable via env)
+    # Default workspace for generated artifacts / project work. Points to the
+    # per-user data dir (NOT the project root) so AI-generated files (profiles,
+    # reports, notes) don't pollute the repo. Code edits still work via explicit
+    # absolute paths — write_file is not path-restricted. Override via env.
     _default_workspace = os.environ.get(
         "AI_COMPANY_WORKSPACE",
-        os.path.join(os.path.dirname(__file__), "..", "..")
+        os.path.expanduser("~/.ai-company/workspace"),
     )
 
     def __init__(self, role: Role):
