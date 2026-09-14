@@ -814,13 +814,8 @@ async def _cmd_session(console, user_input, session_mgr, current_session):
         if len(parts) < 3:
             console.print("[yellow]Usage: /session switch <name|id>[/yellow]")
             return
-        # Auto-summarize current
-        if current_session:
-            from src.session import auto_summarize_conversation
-            try:
-                await auto_summarize_conversation(current_session.id, llm=None, force=True)
-            except Exception:
-                pass
+        # NOTE: Do NOT block on auto_summarize here — it makes a real LLM call
+        # (~25s) that freezes the switch.  Summaries are handled on /quit.
         switched = session_mgr.switch(parts[2])
         if switched:
             console.print(f"[green]✅ Switched to: {switched.name}[/green]")
