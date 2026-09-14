@@ -41,3 +41,7 @@ tmp*.png
 
 # 嵌套的第三方独立仓库(中医资料)，不属于 ai-company
 skills/nihaisha/
+
+# 敏感备份与测试产物
+.env*
+*.bak_*

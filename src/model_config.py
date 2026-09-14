@@ -15,9 +15,9 @@ from typing import Any
 
 CONFIG_PATH = Path(os.getenv("AI_COMPANY_MODEL_CONFIG", "~/.ai-company/model_config.json")).expanduser()
 DEFAULT_BASE_URL = "https://oneapi-comate.baidu-int.com/v1"
-DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_MODEL = "DeepSeek-V4-Flash"
 DEFAULT_PROVIDER = "oneapi"
-STALE_DEEPSEEK_MODELS = {"deepseek-chat", "deepseek-v4-pro"}
+STALE_DEEPSEEK_MODELS = {"deepseek-chat"}
 
 
 @dataclass
@@ -49,8 +49,9 @@ def load_runtime_model(path: Path = CONFIG_PATH) -> RuntimeModelConfig:
     if provider == "deepseek" and model.strip().lower() in STALE_DEEPSEEK_MODELS:
         provider = DEFAULT_PROVIDER
         model = DEFAULT_MODEL
-    if model.strip().lower() == "deepseek-v4-pro":
-        model = DEFAULT_MODEL
+    # NOTE: deepseek-v4-pro is a live, working model on the OneAPI proxy.
+    # Do NOT force-replace it with DEFAULT_MODEL — that made every agent
+    # loop hang (gpt-5.5 chat times out). Use the configured model as-is.
     return RuntimeModelConfig(provider=provider, model=model, base_url=base_url.rstrip("/"))
 
 
