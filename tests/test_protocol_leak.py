@@ -90,7 +90,9 @@ def test_parse_agent_response_still_accepts_plain_answer_on_retry():
     """
     router = ExecutionRouter()
     answer = ("衡水今天白天晴，实时气温 27.9 摄氏度，湿度 50%，空气质量指数 85 属良好，"
-              "东南风一级，能见度 30 公里；夜间转多云，最低气温 21 摄氏度，适合户外活动。")
+              "东南风一级，能见度 30 公里，紫外线很强。夜间转多云，最低气温 21 摄氏度；"
+              "明天白天以晴为主，最高气温 30 摄氏度，南风 3 级，早晚温差较大，建议随身带件薄外套。")
+    assert len(answer) > 100, "样本必须在 100 字符门槛之上，否则测的是长度门槛不是防护"
     parsed = router._parse_agent_response(answer, 4)
     assert parsed["action"] == "final", parsed
     assert "衡水" in parsed["output"]
