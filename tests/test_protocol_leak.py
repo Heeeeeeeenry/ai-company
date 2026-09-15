@@ -82,9 +82,16 @@ def test_parse_agent_response_refuses_protocol_as_final():
 
 
 def test_parse_agent_response_still_accepts_plain_answer_on_retry():
-    """别把纠偏做成"永远不收敛"：正常长散文在第 3 轮后仍应作为答案放行。"""
+    """别把纠偏做成"永远不收敛"：正常长散文在第 3 轮后仍应作为答案放行。
+
+    注：兜底里还有一条**既有**启发式 —— "第 3 轮后 <100 字符且不含关键词"
+    会被判成合规废话。故这里刻意用过百字的真实答案，避免用例随长度压线假红，
+    也确保测的是"协议防护没有误伤"，而不是那条长度门槛。
+    """
     router = ExecutionRouter()
-    parsed = router._parse_agent_response(PROSE * 3, 4)
+    answer = ("衡水今天白天晴，实时气温 27.9 摄氏度，湿度 50%，空气质量指数 85 属良好，"
+              "东南风一级，能见度 30 公里；夜间转多云，最低气温 21 摄氏度，适合户外活动。")
+    parsed = router._parse_agent_response(answer, 4)
     assert parsed["action"] == "final", parsed
     assert "衡水" in parsed["output"]
 
