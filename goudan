@@ -7,66 +7,17 @@
 #   goudan "write fib"  # One-shot query
 #   goudan --telegram   # Start Telegram bot
 #
-# Project resolution order:
-#   1. $AI_COMPANY_HOME (explicit override)
-#   2. directory containing this script (works when run in-place or via symlink)
-#   3. common install locations
-#
-# Python resolution order:
-#   1. $AI_COMPANY_PYTHON (explicit override)
-#   2. <project>/.venv/bin/python  (if the project has its own venv)
-#   3. `python3` on PATH (fallback `python`)
+# Shared env resolution lives in scripts/env.sh (project + absolute Python path).
 
 set -e
 
-# ─── 1. Locate the project ──────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-AI_COMPANY_DIR=""
+# ─── Resolve project + Python (shared with goudan-api) ────────────────
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/env.sh
+. "$_SCRIPT_DIR/scripts/env.sh"
+resolve_python
 
-if [ -n "$AI_COMPANY_HOME" ] && [ -f "$AI_COMPANY_HOME/src/main.py" ]; then
-    AI_COMPANY_DIR="$AI_COMPANY_HOME"
-elif [ -f "$SCRIPT_DIR/src/main.py" ]; then
-    AI_COMPANY_DIR="$SCRIPT_DIR"
-else
-    for candidate in \
-        "$HOME/.openclaw/workspace/ai-company" \
-        "$HOME/ai-company" \
-        "$HOME/openclaw/workspace/ai-company" \
-        "$(dirname "$SCRIPT_DIR")/ai-company" \
-    ; do
-        if [ -f "$candidate/src/main.py" ]; then
-            AI_COMPANY_DIR="$candidate"
-            break
-        fi
-    done
-fi
-
-if [ -z "$AI_COMPANY_DIR" ]; then
-    echo "❌ Cannot find ai-company project."
-    echo "   Set AI_COMPANY_HOME to the project root, or install near ~/.openclaw/workspace/"
-    exit 1
-fi
-
-export AI_COMPANY_HOME="$AI_COMPANY_DIR"
-
-# ─── 2. Locate Python ───────────────────────────────────────────────────
-PYTHON=""
-if [ -n "$AI_COMPANY_PYTHON" ] && command -v "$AI_COMPANY_PYTHON" &>/dev/null; then
-    PYTHON="$AI_COMPANY_PYTHON"
-elif [ -x "$AI_COMPANY_DIR/.venv/bin/python" ]; then
-    PYTHON="$AI_COMPANY_DIR/.venv/bin/python"
-elif command -v python3 &>/dev/null; then
-    PYTHON="python3"
-elif command -v python &>/dev/null; then
-    PYTHON="python"
-fi
-
-if [ -z "$PYTHON" ]; then
-    echo "❌ Python not found. Set AI_COMPANY_PYTHON or install Python 3.10+"
-    exit 1
-fi
-
-# ─── 3. Run ─────────────────────────────────────────────────────────────
+# ─── Run ───────────────────────────────────────────────────────────────
 cd "$AI_COMPANY_DIR"
 
 if [ $# -gt 0 ]; then

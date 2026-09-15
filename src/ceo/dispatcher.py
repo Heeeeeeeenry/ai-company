@@ -330,24 +330,28 @@ async def _plan_complex_task(task: str) -> dict:
 
 # ─── Session Context Injection ────────────────────────
 
-def _build_session_context() -> str:
-    """Assemble the current session's recent conversation + memory for injection.
+def _build_session_context(session_id: Optional[str] = None) -> str:
+    """Assemble a session's recent conversation + memory for injection.
 
     The thin-dispatcher path does NOT go through the legacy LangGraph
     ``_inject_session_context`` (that only runs in run_ceo_legacy), so the CEO
-    and downstream roles would otherwise have no visibility of the current
-    session's history.  Injecting it here keeps cross-session isolation (only
-    the *current* session's data) while giving the assistant the context it
-    needs to answer questions like "李恒是谁" after it was entered earlier in
-    the same session.
+    and downstream roles would otherwise have no visibility of the session's
+    history.  Injecting it here keeps cross-session isolation (only the target
+    session's data) while giving the assistant the context it needs to answer
+    questions like "李恒是谁" after it was entered earlier in the same session.
+
+    When ``session_id`` is given (e.g. an embedded user's conversation), use it
+    directly; otherwise fall back to the global CLI current session.
     """
     try:
-        from src.session import get_session_manager
         from src.session.memory import get_session_memory
-        mgr = get_session_manager()
-        if not mgr.current:
-            return ""
-        mem = get_session_memory(mgr.current.id)
+        if session_id is None:
+            from src.session import get_session_manager
+            mgr = get_session_manager()
+            if not mgr.current:
+                return ""
+            session_id = mgr.current.id
+        mem = get_session_memory(session_id)
         parts = []
 
         # Structured session memories (key facts, e.g. from auto-summarize)
@@ -375,10 +379,14 @@ def _build_session_context() -> str:
 
 # ─── Main Entry Point ───────────────────────────────
 
-async def run_ceo(user_message: str) -> dict:
+async def run_ceo(user_message: str, session_id: Optional[str] = None) -> dict:
     """薄CEO: 匹配角色 → 分派执行 → 看结果。
 
     三步: quick_triage → match_role → dispatch (带 escalation 回路)
+
+    ``session_id``: optional — when given (e.g. an embedded user's conversation),
+    the CEO injects that session's history as context instead of the global CLI
+    current session.  This is how the multi-user embedding works.
     """
     t0 = time.time()
     task = user_message.strip()
@@ -401,9 +409,9 @@ async def run_ceo(user_message: str) -> dict:
 
     # ── Step 3: Complex? Plan first ──
     mode, context = "direct", ""
-    # Always seed with the current session's history so roles can see earlier
-    # turns of THIS session (thin dispatcher doesn't inject it otherwise).
-    sess_ctx = _build_session_context()
+    # Always seed with the session's history so roles can see earlier turns of
+    # THIS session (thin dispatcher doesn't inject it otherwise).
+    sess_ctx = _build_session_context(session_id)
     if _is_complex_task(task) and role_name in ("developer", "qa"):
         try:
             plan = await _plan_complex_task(task)

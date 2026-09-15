@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# ─── 狗蛋儿 · AI Company Embedding API Launcher ───
+#
+# Starts the FastAPI adapter that the 民意智感中心 admin system uses to
+# embed ai-company.  Reuses the same project + absolute-Python resolution as
+# `goudan` (scripts/env.sh), so the background/non-interactive conda-activation
+# pitfall ("ModuleNotFoundError: fastapi") is avoided by always invoking the
+# resolved absolute interpreter path.
+#
+# Usage:
+#   goudan-api                 # start on 127.0.0.1:8020
+#   goudan-api --port 9000     # override port
+#   AI_COMPANY_API_PORT=9000 goudan-api
+#
+# Env overrides: AI_COMPANY_API_HOST, AI_COMPANY_API_PORT
+
+set -e
+
+# ─── Resolve project + Python (shared with goudan) ─────────────────────
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=scripts/env.sh
+. "$_SCRIPT_DIR/scripts/env.sh"
+resolve_python
+
+# ─── Run API server ────────────────────────────────────────────────────
+cd "$AI_COMPANY_DIR"
+exec "$PYTHON" -m src.api_server "$@"
