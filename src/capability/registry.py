@@ -81,7 +81,7 @@ DEFAULT_CAPABILITIES: dict[str, Capability] = {
         name="web_search",
         description="网络搜索和信息获取",
         agent="ResearchAgent",
-        tools=["web_search", "web_fetch", "market_series"],
+        tools=["web_search", "web_fetch", "market_series", "weather"],
     ),
     # Compat alias — planner.py uses "research" but registry canonical name is
     # "web_search".  This alias prevents silent tool loss when resolve_tools()
@@ -90,7 +90,7 @@ DEFAULT_CAPABILITIES: dict[str, Capability] = {
         name="research",
         description="网络搜索和信息获取 (兼容别名 → web_search)",
         agent="ResearchAgent",
-        tools=["web_search", "web_fetch", "market_series"],
+        tools=["web_search", "web_fetch", "market_series", "weather"],
     ),
     "vision": Capability(
         name="vision",

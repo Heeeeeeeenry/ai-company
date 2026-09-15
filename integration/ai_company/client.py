@@ -85,3 +85,39 @@ class AiCompanyClient:
     def delete_conversation(self, user_id: str, conversation_id: str) -> dict:
         return self._request("DELETE", f"/ai/conversations/{conversation_id}",
                              params={"user_id": user_id})
+
+    # ── 流式对话（衡水定制：逐字输出）────────────────────────────────
+
+    def open_chat_stream(self, user_id: str, message: str,
+                         conversation_id: str | None = None,
+                         title: str | None = None):
+        """POST /ai/chat/stream，返回**未读完的流式响应对象**。
+
+        与 ``chat()`` 的区别：这里不 ``read()`` 到底，而是把响应体交给调用方
+        边读边转发（Django 侧再包一层 StreamingHttpResponse）。
+        非 2xx 会在这里就抛 ``AiCompanyError`` —— 必须在开始流式输出*之前*
+        拿到状态码，否则前端只能看到一半的 200。
+        """
+        url = f"{self.base_url}/ai/chat/stream"
+        data = json.dumps({
+            "user_id": user_id,
+            "message": message,
+            "conversation_id": conversation_id,
+            "title": title,
+        }).encode("utf-8")
+        headers = {"Accept": "text/event-stream", "Content-Type": "application/json"}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            return urllib.request.urlopen(req, timeout=self.timeout)
+        except urllib.error.HTTPError as e:
+            raw = ""
+            try:
+                raw = e.read().decode("utf-8")
+                detail = json.loads(raw).get("detail", raw)
+            except Exception:
+                detail = raw or e.reason
+            raise AiCompanyError(e.code, str(detail)) from None
+        except urllib.error.URLError as e:
+            raise AiCompanyError(503, f"ai-company 不可达: {e.reason}") from None

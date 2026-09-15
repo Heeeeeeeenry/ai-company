@@ -23,6 +23,12 @@ DEFAULTS = {
     "AI_COMPANY_TOKEN": "",
     # user_id 命名空间前缀
     "AI_COMPANY_USER_PREFIX": "admin",
+    # ── 反向通道（衡水定制）────────────────────────────────────────────
+    # AI 「受控取数工具层」的内部凭据。ai-company 侧带着这个 token 回宿主
+    # 调工具目录（见 views.internal_tools_*）。安装器随机生成、写进宿主
+    # .env（600）并注入容器 env。
+    # **留空 = 整条通道关闭**（宁可没有功能，也不开一个无鉴权的内网端点）。
+    "AI_COMPANY_INTERNAL_TOKEN": "",
 }
 
 

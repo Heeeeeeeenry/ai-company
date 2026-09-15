@@ -76,7 +76,13 @@ def test_main(m) -> None:
     subprocess.run(["git", "-C", str(da), "add", "-A"], check=True)
 
     argv = sys.argv
-    sys.argv = ["patch_dev_admin.py", "--stage", str(stage), "--dev-admin", str(da)]
+    # --service-env 必须显式指到临时文件：默认值是 ~/ai-company/ai-company.env，
+    # 跑测试时绝不能碰开发机上的真实容器 env。
+    svc = root / "ai-company.env"
+    svc.write_text("AI_COMPANY_SERVICE_MODE=1\nAI_COMPANY_HOST_BASE_URL=http://127.0.0.1:9\n",
+                   encoding="utf-8")
+    sys.argv = ["patch_dev_admin.py", "--stage", str(stage), "--dev-admin", str(da),
+                "--service-env", str(svc)]
     try:
         m.report.clear()
         rc = m.main()
@@ -94,11 +100,36 @@ def test_main(m) -> None:
         ck("git checkout --" in out and "无需 .bak" in out, "打印 git 回滚命令")
         ck("无法回滚" not in out, "文件被 git 跟踪 -> 不误报告警", out)
 
+        # ── 取数工具层：内网挂载 + 共享 token 双写 ──────────────────
+        urls_now = ur.read_text(encoding="utf-8")
+        ck("ai-internal/" in urls_now, "urls.py 挂载 /ai-internal/（取数工具层）")
+        ck(
+            urls_now.index(m.INTERNAL_URL_LINE) < urls_now.index(m.ANCHOR_URL),
+            "/ai-internal/ 挂在 api/ 之前（否则被 api.urls 抢走）",
+        )
+        st_now = st.read_text(encoding="utf-8")
+        mt = m.TOKEN_RE.search(st_now)
+        ck(mt is not None, "settings.py 写入 AI_COMPANY_INTERNAL_TOKEN", st_now[-200:])
+        token = mt.group(1) if mt else ""
+        ck(len(token) == 48, "token 为 48 位 hex", str(len(token)))
+        env_now = svc.read_text(encoding="utf-8")
+        ck(f"AI_COMPANY_HOST_INTERNAL_TOKEN={token}" in env_now, "容器 env 写入同一个 token")
+        ck("AI_COMPANY_HOST_BASE_URL=http://host.docker.internal:15173" in env_now,
+           "容器 env 写入宿主地址（走 docker 网关）")
+        ck("AI_COMPANY_HOST_BASE_URL=http://127.0.0.1:9" not in env_now, "旧值被覆盖（不追加重复行）")
+        ck((svc.stat().st_mode & 0o777) == 0o600, "容器 env 权限 600",
+           oct(svc.stat().st_mode & 0o777))
+
         m.report.clear()
         rc2 = m.main()
         ck(rc2 == 0 and "已含 ai_company（跳过）" in "\n".join(m.report), "二次安装幂等（跳过）")
         ck(idx.read_text(encoding="utf-8") == html, "二次安装不改 index.html")
         ck(not list(da.rglob("*.bak*")), "二次安装仍无 .bak")
+        # 这条最要紧：重复安装若重新生成 token，已经跑着的容器会一直 401
+        mt2 = m.TOKEN_RE.search(st.read_text(encoding="utf-8"))
+        ck(mt2 is not None and mt2.group(1) == token, "二次安装不重新生成 token")
+        ck(svc.read_text(encoding="utf-8") == env_now, "二次安装不改容器 env")
+        ck("已挂载 /ai-internal/（跳过）" in "\n".join(m.report), "内网挂载幂等")
     finally:
         sys.argv = argv
         shutil.rmtree(root, ignore_errors=True)

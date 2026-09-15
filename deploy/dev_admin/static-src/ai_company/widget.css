@@ -718,6 +718,80 @@
   text-align: right;
 }
 
+/* ── 流式（取数过程可见 + 逐字追加 + 导出卡片）───────────────────────── */
+
+.aicw-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #8a94a6;
+}
+
+.aicw-status i {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+/* 逐字长的时候挂在末尾的光标 */
+.aicw-bubble.is-streaming::after {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: currentColor;
+  opacity: 0.55;
+  animation: aicw-caret 1s steps(2) infinite;
+}
+
+@keyframes aicw-caret {
+  0%,
+  49% {
+    opacity: 0.55;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.aicw-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 82%;
+}
+
+.aicw-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #e3e8f0;
+  border-radius: 10px;
+  background: #fff;
+  color: #2b3a55;
+  font-size: 13px;
+  text-decoration: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.aicw-file:hover {
+  border-color: #3b82f6;
+  color: #1d4ed8;
+}
+
+.aicw-file i:first-child {
+  color: #16a34a;
+}
+
+.aicw-file i:last-child {
+  opacity: 0.5;
+  font-size: 11px;
+}
+
 /* 窄屏：面板铺开 */
 @media (max-width: 520px) {
   .aicw-root {

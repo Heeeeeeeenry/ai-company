@@ -84,10 +84,22 @@
 
 宿主已有 `AI_COMPANY_TOKEN`（宿主 → ai-company 方向）。本定制新增反向通道：
 
-- 安装器生成随机 32 字节 `AI_COMPANY_INTERNAL_TOKEN`，写入宿主 `~/dev_admin/.env`（已 600）并注入容器 env（600）。
-- `POST /api/ai/internal/tools/<name>/`，头 `X-AI-Internal-Token`，体 `{"user_id": "admin:<pk>", "args": {...}}`。
-- 宿主侧校验 token 后，**按 pk 从 police_users 取用户 dict**（服务端解析，绝不信 body 里的其它字段），再执行工具。
-- 仅监听 127.0.0.1，不出公网；token 不回显、不进日志。
+- 安装器生成 `secrets.token_hex(24)`（48 位 hex），**写入两处且必须一致**：
+  - 宿主 `backend_django/backend_django/settings.py` → `AI_COMPANY_INTERNAL_TOKEN`（校验方）
+  - 容器 `~/ai-company/ai-company.env` → `AI_COMPANY_HOST_INTERNAL_TOKEN`（发起方，600）
+- **重复安装绝不重新生成**：宿主侧优先复用 settings.py 里已有的值，其次是容器 env 里的。
+  否则每装一次就把已经跑起来的容器踢成 401（回归测试 `installer_regression.py` 专门守这条）。
+- 端点挂在 `/api/` **之外**：`GET /ai-internal/tools/`、`POST /ai-internal/tools/<name>/`，
+  头 `X-AI-Internal-Token`，体 `{"user_id": "admin:<pk>", "args": {...}}`。
+  中间件只校验 `/api/` 前缀（见 `api/middleware/session_auth.py`），而这条通道的调用方
+  是 ai-company 进程（没有浏览器 cookie），所以不能挂进 `/api/`。
+- 宿主侧校验 token 后，**按 pk 从 police_users 取用户 dict**（服务端解析，绝不信 body
+  里的其它字段），再走宿主自己的 service 层与权限中心。
+- 网络方向：容器里的 `127.0.0.1` 是容器自己，所以走 docker 网关
+  （compose 已加 `extra_hosts: host.docker.internal:host-gateway`，容器 env 里
+  `AI_COMPANY_HOST_BASE_URL=http://host.docker.internal:15173`）。
+  实测：网关 `172.19.0.1:15173` 从容器内 TCP 可连（宿主 uvicorn 绑 `0.0.0.0`）。
+- 该前缀不应被公网反代暴露；host 上 `/ai-internal/` 只由 nginx 内部转发或直连本机。
 
 ## 5. ai-company 侧编排（真实统计的硬保证）
 
@@ -101,16 +113,43 @@
 
 ## 6. 流式与导出
 
-- 新增 `POST /ai/chat/stream`（SSE），事件：`status`(正在查询数据…) / `tool`(工具名) / `delta`(文本增量) / `files`(下载句柄) / `meta`(conversation_id) / `done`。旧 `/ai/chat` 保持整段 JSON 不变（兼容 + 评测脚本继续可用）。
-- 只推**最终成文**那一跳的 token；选工具阶段不外泄。
-- 导出：`export_letters` → 宿主生成 CSV 到 `~/dev_admin/.run/ai_exports/<handle>.csv`，返回句柄 `handle = HMAC(secret, user_pk|args|ts)`；前端拿 `/api/ai/internal/files/<handle>/` 下载（cookie 鉴权 + 句柄只允许本人）。
+- 新增 `POST /ai/chat/stream`（容器）→ 宿主 `POST /api/ai/chat/stream/`（SSE 透传）。
+  事件契约（`widget.js` 按 `type` 分派，只增字段不改语义）：
+
+  | type | 载荷 | 用途 |
+  |------|------|------|
+  | `meta` | `conversation_id`, `title` | 会话落盘（首次提问即建会话） |
+  | `status` | `text` | 「正在查询数据…」 |
+  | `tool` | `name`, `label` | 「正在统计信件总量…」——**取数过程对用户可见** |
+  | `files` | `[{url,name}]` | 导出文件卡片 |
+  | `delta` | `text` | 逐字增量（只推成文那一跳） |
+  | `correction` | `unsupported[]` | 成文里出现无出处数字（罕见，留痕） |
+  | `error` / `done` | `detail` / `reply` | 终止 |
+
+- 旧 `/ai/chat` 保持整段 JSON 不变（兼容 + 评测脚本继续可用）。
+- 宿主侧转发要点：**先拿到上游状态码再开始流**（非 2xx 直接回 403/500 JSON，
+  不吐半截 200）；`X-Accel-Buffering: no` + `Cache-Control: no-cache`，
+  否则 nginx 会把整段缓冲掉、逐字效果消失。
+- 导出：`export_letters` → 宿主生成 CSV 到 `~/dev_admin/.run/ai_exports/<handle>.csv`，
+  返回句柄 `handle = <payload>.<HMAC(secret, payload)>`（签名里绑 `user_pk`）。
+  下载走 **`/api/ai/files/<handle>/`**（不是 `/ai-internal/`）——这样能白拿
+  管理端的 cookie 登录校验，且句柄只允许本人。
 
 ## 7. 前端（widget.js）
 
-- `streamChat()`：`fetch` + `res.body.getReader()` 解 SSE；先建空气泡，`delta` 到达即 `bubble.textContent += chunk`，结束再 `mdToHtml` 重渲染。
-- 中间态：复用 `appendTyping()`，加 `label`（收到 `tool` 事件换成「正在统计信件…」）。
-- 文件卡片：`appendMessage` 支持 `files:[{url,name}]` → `<a class="aicw-file">`（新增 CSS，蓝系 #eff6ff/#2563eb）。
-- **测试 fetch 桩必须先加 `body:{getReader()}`**，否则流式改造会让 14 条 widget 断言全挂（当前桩不返回 body）。
+- `send()` 改走 `postStream('/chat/stream/')`：`fetch` + `res.body.getReader()` 解 SSE。
+  **不用 `EventSource`** —— 它只能 GET、塞不了 JSON body，也读不到 403 响应体，
+  而「会话归属失效就原地重开」正好依赖后者。
+- 分帧：按 `\n\n` 切帧、`data:` 前缀取值，**半包留在缓冲里等下一块**
+  （真实代理会在 JSON 中间切包）。单帧解析失败只丢那一帧，不炸整轮。
+- 渲染：先建空气泡承接 `delta`（`text` 累加后 `mdToHtml` 重渲染，带 `is-streaming` 光标）；
+  `tool`/`status` 事件把打字气泡文案换成工具文案；`files` 事件渲染 `<a class="aicw-file">` 卡片。
+- 403 自愈：首次带旧 `cid` 拿到 403 → 清掉 `cid` 重发一次（`forgetSession()`），
+  用户侧看不到报错。
+- 错误兜底：401 提示重新登录；已经出了半截文字则追加「（回答中断：…）」而不是清屏。
+- **测试 fetch 桩必须先加 `body:{getReader()}`**，否则流式改造会让 widget 断言全挂
+  （旧桩只认 `/chat/` 且不返回 body）。桩里还故意把一个 `tool` 事件的 JSON 从中间切开，
+  用来守分帧逻辑。
 
 ## 8. 分阶段与验收
 

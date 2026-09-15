@@ -6,6 +6,7 @@ Financial data (market_series) uses Yahoo/Macrotrends/Tencent APIs.
 """
 
 import sys
+import os
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -40,6 +41,12 @@ def web_search(query: str, max_results: int = 5) -> str:
     # ── Curated: known reliable URLs for common queries ──
     query_lower = query.lower()
     curated = None
+
+    # 天气：直连数据接口。网页是 JS 壳，Tavily 也给不了实时气温，
+    # 所以这里必须短路到 weather()，不能落到下面的 Tavily 分支。
+    if _vre.search(r"天气|气温|降雨|下雨|台风|空气质量|weather", query_lower):
+        return weather(_extract_city(query))
+
     if _vre.search(r"gold|金价|黄金|gold price", query_lower):
         curated = (
             "📊 Gold Price Data Sources (reliable, no API needed):\n"
@@ -107,6 +114,209 @@ def web_search(query: str, max_results: int = 5) -> str:
 
     except Exception as e:
         return f"SEARCH FAILED (Tavily): {e}"
+
+
+# ─── Weather ────────────────────────────────────
+# 天气**不能**走 web_search / web_fetch：中国天气网的网页是 JS 壳
+# （抓 cityinfo/101090801.html 只会得到"正在努力为您加载"），
+# 数据在 d1.weather.com.cn 的 JSON 接口里，只多要一个 Referer 头。
+# 主源：中国天气网（权威、无需 key）；兜底：open-meteo（无需 key）。
+
+DEFAULT_WEATHER_CITY = os.environ.get("AI_COMPANY_DEFAULT_CITY", "衡水")
+
+_WEATHER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Referer": "http://www.weather.com.cn/",
+}
+
+# WMO weather_code → 中文（open-meteo 兜底源用）
+_WMO_CN = {
+    0: "晴", 1: "少云", 2: "多云", 3: "阴", 45: "雾", 48: "雾凇",
+    51: "小毛毛雨", 53: "毛毛雨", 55: "大毛毛雨", 56: "冻毛毛雨", 57: "冻毛毛雨",
+    61: "小雨", 63: "中雨", 65: "大雨", 66: "冻雨", 67: "冻雨",
+    71: "小雪", 73: "中雪", 75: "大雪", 77: "雪粒",
+    80: "小阵雨", 81: "阵雨", 82: "强阵雨", 85: "小阵雪", 86: "大阵雪",
+    95: "雷阵雨", 96: "雷阵雨伴冰雹", 99: "强雷阵雨伴冰雹",
+}
+
+# 问句里不是城市名的词，避免"今天天气"把"今天"当城市
+_WEATHER_NON_CITY = {
+    "今天", "明天", "后天", "现在", "当地", "这里", "那边", "今日",
+    "请问", "查询", "看看", "如何", "怎么", "情况", "预报", "气温", "天气",
+}
+
+
+def _extract_city(text: str) -> str:
+    """从问句里抠城市名（"衡水天气" → 衡水）；抠不到用默认城市。"""
+    m = re.search(r"([\u4e00-\u9fff]{2,8}?)(?:今天|明天|后天|现在)?(?:的)?(?:天气|气温|预报)", text)
+    if m and m.group(1) not in _WEATHER_NON_CITY:
+        return m.group(1)
+    m = re.search(r"(?:天气|气温|预报)[^\u4e00-\u9fff]{0,4}([\u4e00-\u9fff]{2,8})", text)
+    if m and m.group(1) not in _WEATHER_NON_CITY:
+        return m.group(1)
+    # 英文问法（weather in Tokyo）走 open-meteo 的地理编码，
+    # 不回落默认城市 —— 否则"问东京答衡水"就是静默答错。
+    m = re.search(
+        r"(?:weather|temperature|forecast)\s*(?:in|of|for|at)?\s*([A-Za-z][A-Za-z\s\-']{1,30})",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        city = m.group(1).strip(" -'")
+        city = re.sub(r"\b(today|tomorrow|now|please|how|is|the)\b", " ", city, flags=re.IGNORECASE)
+        city = " ".join(city.split())
+        if city:
+            return city
+    return DEFAULT_WEATHER_CITY
+
+
+def _resolve_cn_city_code(city: str) -> str:
+    """城市名 → 中国天气网编码（衡水 → 101090801）。无需 key。"""
+    url = "http://toy1.weather.com.cn/search?cityname=" + urllib.parse.quote(city)
+    with urllib.request.urlopen(
+        urllib.request.Request(url, headers=_WEATHER_HEADERS), timeout=10
+    ) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    m = re.search(r'"ref"\s*:\s*"(\d{9})', raw)
+    return m.group(1) if m else ""
+
+
+def _fetch_cn_weather(code: str) -> dict:
+    """拉实时（sk_2d）+ 今日预报/预警（weather_index）。"""
+    out: dict = {}
+    with urllib.request.urlopen(
+        urllib.request.Request(f"http://d1.weather.com.cn/sk_2d/{code}.html", headers=_WEATHER_HEADERS),
+        timeout=10,
+    ) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    m = re.search(r"=\s*(\{.*\})", raw, re.DOTALL)
+    if m:
+        out["realtime"] = json.loads(m.group(1))
+
+    with urllib.request.urlopen(
+        urllib.request.Request(
+            f"http://d1.weather.com.cn/weather_index/{code}.html", headers=_WEATHER_HEADERS
+        ),
+        timeout=10,
+    ) as resp:
+        raw2 = resp.read().decode("utf-8", "replace")
+    m2 = re.search(r"cityDZ\s*=\s*(\{.*?\});", raw2, re.DOTALL)
+    if m2:
+        out["today"] = json.loads(m2.group(1)).get("weatherinfo") or {}
+    m3 = re.search(r"alarmDZ\s*=\s*(\{.*?\});", raw2, re.DOTALL)
+    if m3:
+        out["alarms"] = (json.loads(m3.group(1)) or {}).get("w") or []
+    return out
+
+
+def _fetch_open_meteo_weather(city: str) -> dict:
+    """兜底源：open-meteo（无需 key，非中国城市也能用）。"""
+    geo_url = (
+        "https://geocoding-api.open-meteo.com/v1/search?name="
+        + urllib.parse.quote(city)
+        + "&count=1&language=zh"
+    )
+    with urllib.request.urlopen(
+        urllib.request.Request(geo_url, headers={"User-Agent": _next_ua(), "Accept": "application/json"}),
+        timeout=12,
+    ) as resp:
+        hits = json.loads(resp.read()).get("results") or []
+    if not hits:
+        return {}
+    loc = hits[0]
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?latitude={loc['latitude']}"
+        f"&longitude={loc['longitude']}"
+        "&current=temperature_2m,relative_humidity_2m,apparent_temperature,"
+        "precipitation,wind_speed_10m,weather_code"
+        "&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_probability_max"
+        "&forecast_days=3&timezone=Asia%2FShanghai"
+    )
+    with urllib.request.urlopen(
+        urllib.request.Request(url, headers={"User-Agent": _next_ua()}), timeout=12
+    ) as resp:
+        return json.loads(resp.read())
+
+
+def weather(city: str = "") -> str:
+    """查某城市实时天气 + 今日预报；返回中文文本（含来源）。"""
+    city = (city or "").strip() or DEFAULT_WEATHER_CITY
+    data_lines: list[str] = []
+    err_notes: list[str] = []
+
+    code = ""
+    try:
+        code = _resolve_cn_city_code(city)
+    except Exception as e:
+        err_notes.append(f"城市编码解析失败：{e}")
+
+    if code:
+        try:
+            data = _fetch_cn_weather(code)
+            rt = data.get("realtime") or {}
+            if rt.get("temp"):
+                data_lines.append(
+                    f"{rt.get('cityname', city)} 实时天气（{rt.get('date', '')} {rt.get('time', '')} 更新）："
+                )
+                data_lines.append(f"  天气：{rt.get('weather', '?')}　气温：{rt.get('temp', '?')}°C")
+                data_lines.append(
+                    f"  风：{rt.get('WD', '?')} {rt.get('WS', '?')}　湿度：{rt.get('SD', '?')}"
+                    f"　气压：{rt.get('qy', '?')}hPa　能见度：{rt.get('njd', '?')}"
+                )
+                data_lines.append(
+                    f"  降水：{rt.get('rain', '0')}mm（24h {rt.get('rain24h', '0')}mm）　AQI：{rt.get('aqi', '?')}"
+                )
+            today = data.get("today") or {}
+            if today.get("temp") and today.get("temp") != "999":
+                data_lines.append(
+                    f"  今日预报：{today.get('weather', '?')}　{today.get('temp', '?')}"
+                    f"　夜间 {today.get('tempn', '?')}　{today.get('wd', '?')} {today.get('ws', '?')}"
+                )
+            alarms = data.get("alarms") or []
+            if alarms:
+                titles = "、".join(str((a or {}).get("w1", "")) for a in alarms[:3])
+                data_lines.append(f"  ⚠ 气象预警 {len(alarms)} 条：{titles}")
+            if data_lines:
+                data_lines.append(f"  来源：http://www.weather.com.cn/weather/{code}.shtml")
+        except Exception as e:
+            err_notes.append(f"中国天气网取数失败：{e}")
+
+    if not data_lines:
+        try:
+            om = _fetch_open_meteo_weather(city)
+            cur = om.get("current") or {}
+            daily = om.get("daily") or {}
+            if cur:
+                data_lines.append(f"{city} 实时天气（open-meteo 备用源）：")
+                data_lines.append(
+                    f"  天气：{_WMO_CN.get(int(cur.get('weather_code') or -1), '?')}　"
+                    f"气温：{cur.get('temperature_2m', '?')}°C（体感 {cur.get('apparent_temperature', '?')}°C）"
+                )
+                data_lines.append(
+                    f"  湿度：{cur.get('relative_humidity_2m', '?')}%　"
+                    f"风速：{cur.get('wind_speed_10m', '?')}km/h　降水：{cur.get('precipitation', '?')}mm"
+                )
+                dates = daily.get("time") or []
+                for i, d in enumerate(dates[:3]):
+                    hi = (daily.get("temperature_2m_max") or [None] * 3)[i]
+                    lo = (daily.get("temperature_2m_min") or [None] * 3)[i]
+                    wc = (daily.get("weather_code") or [None] * 3)[i]
+                    pop = (daily.get("precipitation_probability_max") or [None] * 3)[i]
+                    data_lines.append(
+                        f"  {d}：{_WMO_CN.get(int(wc) if wc is not None else -1, '?')}　{lo}~{hi}°C　降水概率 {pop}%"
+                    )
+                data_lines.append("  来源：https://open-meteo.com/")
+        except Exception as e:
+            err_notes.append(f"open-meteo 备用源失败：{e}")
+
+    if data_lines:
+        if err_notes:
+            data_lines.append("  （提示：" + "；".join(err_notes) + "）")
+        return "\n".join(data_lines)
+    # 两源全挂：必须以"未能获取"开头 —— executor 靠这个前缀把它判为工具失败，
+    # 否则模型会拿到一条"成功"的空结果然后自己编。
+    detail = ("；".join(err_notes)) if err_notes else "中国天气网无编码（可能不是中国城市）、open-meteo 也无结果"
+    return f"未能获取 {city} 的天气数据：{detail}"
 
 
 # ─── Web Fetch ──────────────────────────────────
@@ -321,5 +531,9 @@ if __name__ == "__main__":
         url = sys.argv[2] if len(sys.argv) > 2 else ""
         max_c = int(sys.argv[3]) if len(sys.argv) > 3 else 5000
         print(web_fetch(url, max_c))
+    elif cmd == "weather":
+        print(weather(sys.argv[2] if len(sys.argv) > 2 else ""))
+    elif cmd == "market_series":
+        print(market_series(sys.argv[2] if len(sys.argv) > 2 else "", 30))
     else:
-        print(f"Usage: {sys.argv[0]} search|fetch <query|url> [limit]")
+        print(f"Usage: {sys.argv[0]} search|fetch|weather|market_series <query|url|city> [limit]")

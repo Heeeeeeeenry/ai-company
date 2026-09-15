@@ -407,6 +407,84 @@ async function deleteSession(cid, ev) {
   loadSessions()
 }
 
+/* ── SSE 流式 ───────────────────────────────────────────────────────── */
+
+/* 用 fetch + ReadableStream，不用 EventSource：EventSource 只能 GET、塞不了 JSON
+   body，也读不到 403 响应体 —— 而「会话归属失效就原地重开」正好依赖后者。
+   逐帧解析 `data: {...}\n\n`，半个帧留在 buf 等下一块。 */
+async function* sseEvents(reader) {
+  const dec = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    let cut
+    while ((cut = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, cut)
+      buf = buf.slice(cut + 2)
+      for (const line of frame.split('\n')) {
+        if (!line.startsWith('data:')) continue
+        const body = line.slice(5).trim()
+        if (!body) continue
+        try {
+          yield JSON.parse(body)
+        } catch {
+          /* 残缺帧：忽略，等下一块补上（后端不会发半个 JSON，但代理会切包） */
+        }
+      }
+    }
+  }
+}
+
+async function postStream(path, body) {
+  const res = await fetch(`${API}${path}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok || !res.body) {
+    let detail = ''
+    try {
+      detail = (await res.json()).detail || ''
+    } catch {
+      /* 非 JSON 错误体 */
+    }
+    const err = new Error(detail || `请求失败（HTTP ${res.status}）`)
+    err.status = res.status
+    throw err
+  }
+  return res.body.getReader()
+}
+
+/* 取数过程对用户可见：把「正在统计信件总量…」这类文案写进等待气泡。 */
+function setTypingText(el, text) {
+  const bubble = el.querySelector('.aicw-bubble')
+  if (bubble) {
+    bubble.innerHTML =
+      `<span class="aicw-status"><i class="fa-solid fa-circle-notch fa-spin"></i>${esc(text)}</span>`
+  }
+}
+
+function appendFiles(files) {
+  if (!files || !files.length) return
+  const el = document.createElement('div')
+  el.className = 'aicw-msg'
+  el.dataset.role = 'assistant'
+  el.innerHTML = `
+    <div class="aicw-msg-avatar"><i class="fa-solid fa-file-arrow-down"></i></div>
+    <div class="aicw-files">${files
+      .map(
+        (f) => `<a class="aicw-file" href="${esc(f.url)}" target="_blank" rel="noopener">
+        <i class="fa-solid fa-file-excel"></i><span>${esc(f.name || '导出文件')}</span>
+        <i class="fa-solid fa-download"></i></a>`
+      )
+      .join('')}</div>`
+  bodyEl.appendChild(el)
+  scrollToBottom(true)
+}
+
 async function send() {
   const raw = inputEl.value.trim()
   if (!raw || state.busy) return
@@ -426,35 +504,75 @@ async function send() {
 
   setBusy(true)
   const typing = appendTyping()
+
+  let bubble = null
+  let text = ''
+  let streamed = false
+
+  /* 第一个 delta 到达前是「等待气泡」，到达后换成真正的回答气泡并逐字长。 */
+  const ensureBubble = () => {
+    if (bubble) return
+    typing.remove()
+    bubble = appendMessage('assistant', '').querySelector('.aicw-bubble')
+    if (bubble) bubble.classList.add('is-streaming')
+  }
+
   try {
-    let data
+    const start = (message, conversation_id) =>
+      postStream('/chat/stream/', { message, conversation_id })
+
+    let reader
     try {
-      data = await api('/chat/', {
-        method: 'POST',
-        body: { message: outgoing, conversation_id: state.cid || null },
-      })
+      reader = await start(outgoing, state.cid || null)
     } catch (err) {
       /* 403 + 归属校验失败 = 手里这个 cid 是上一位登录用户留下的。
          丢掉它、原地重开一轮，用户无感，也不用刷新页面。 */
       if (err.status === 403 && state.cid) {
         forgetSession()
-        data = await api('/chat/', {
-          method: 'POST',
-          body: { message: outgoing, conversation_id: null },
-        })
+        reader = await start(outgoing, null)
       } else {
         throw err
       }
     }
-    typing.remove()
-    state.cid = data.conversation_id || state.cid
-    if (state.cid) sessionStorage.setItem(K_CID, state.cid)
-    state.turns.push({ user: raw, assistant: data.reply })
-    const reply = String(data.reply || '').trim()
-    if (reply) {
-      appendMessage('assistant', reply)
-    } else {
-      appendMessage('assistant', '（本轮没有返回内容）', { error: true })
+
+    for await (const ev of sseEvents(reader)) {
+      switch (ev.type) {
+        case 'meta':
+          state.cid = ev.conversation_id || state.cid
+          if (state.cid) sessionStorage.setItem(K_CID, state.cid)
+          break
+        case 'status':
+          if (!bubble) setTypingText(typing, ev.text || '正在处理…')
+          break
+        case 'tool':
+          if (!bubble) setTypingText(typing, ev.label || '正在查询…')
+          break
+        case 'files':
+          appendFiles(ev.files)
+          break
+        case 'delta':
+          ensureBubble()
+          streamed = true
+          text += ev.text || ''
+          if (bubble) bubble.innerHTML = mdToHtml(text)
+          scrollToBottom(false)
+          break
+        case 'correction':
+          console.warn('成文里的数字查无出处：', ev.unsupported)
+          break
+        case 'error':
+          throw new Error(ev.detail || '服务端出错')
+        case 'done':
+          if (!text && ev.reply) {
+            ensureBubble()
+            streamed = true
+            text = ev.reply
+            if (bubble) bubble.innerHTML = mdToHtml(text)
+          }
+          break
+        default:
+          break
+      }
     }
   } catch (err) {
     typing.remove()
@@ -462,10 +580,28 @@ async function send() {
       err.status === 401
         ? '登录状态已失效，刷新页面重新登录后即可继续。'
         : err.message
-    appendMessage('assistant', `没能拿到回复：${hint}`, { error: true })
+    if (bubble && text) {
+      /* 已经吐了一半：保留已出的内容，只追加中断提示，别让用户白等 */
+      appendMessage('assistant', `（回答中断：${hint}）`, { error: true })
+    } else {
+      if (bubble) bubble.closest('.aicw-msg')?.remove()
+      appendMessage('assistant', `没能拿到回复：${hint}`, { error: true })
+    }
+    text = ''
+    streamed = false
   } finally {
+    if (bubble) bubble.classList.remove('is-streaming')
+    typing.remove()
     setBusy(false)
     inputEl.focus()
+  }
+
+  const reply = String(text || '').trim()
+  if (reply) {
+    state.turns.push({ user: raw, assistant: reply })
+  } else if (!streamed) {
+    if (bubble) bubble.closest('.aicw-msg')?.remove()
+    appendMessage('assistant', '（本轮没有返回内容）', { error: true })
   }
 }
 

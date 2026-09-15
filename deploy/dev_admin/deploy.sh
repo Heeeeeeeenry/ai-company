@@ -65,6 +65,8 @@ echo -n "首页 /            -> HTTP "; curl -s -o /dev/null -w "%{http_code}\n"
 echo -n "未登录 /api/ai/health/ -> HTTP "; curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:${WEB_PORT}/api/ai/health/"
 echo -n "悬浮窗 JS         -> HTTP "; curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:${WEB_PORT}/src/ai_company/widget.js"
 echo -n "悬浮窗 CSS        -> HTTP "; curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:${WEB_PORT}/src/ai_company/widget.css"
+echo -n "流式未登录 /api/ai/chat/stream/ -> HTTP "; curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{\"message\":\"x\"}" "http://127.0.0.1:${WEB_PORT}/api/ai/chat/stream/"
+echo -n "取数工具层未带 token /ai-internal/tools/ -> HTTP "; curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:${WEB_PORT}/ai-internal/tools/"
 echo "---- backend.log 末尾 ----"
 tail -15 $HOME/dev_admin/.logs/backend.log'
 

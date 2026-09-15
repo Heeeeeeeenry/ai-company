@@ -32,6 +32,14 @@ services:
     pull_policy: never
     ports:
       - '127.0.0.1:8020:8020'
+    # AI 取数工具层是**容器回宿主**调用（宿主 dev_admin 的 /ai-internal/ 由
+    # ai_company.urls_internal 提供），所以容器必须能到达宿主。
+    # dev_admin 的 uvicorn 绑 0.0.0.0:15173，走 docker 网关即可命中宿主 loopback；
+    # host-gateway 由 docker 自己解析成当前 bridge 网关 IP（不要写死 172.x）。
+    # 反过来不能用 network_mode: host —— 那样容器里的 0.0.0.0:8020 就直接暴露到
+    # 宿主的全部网卡上了（本机 80/443/15173 都在 0.0.0.0，等于把 AI 网关裸奔）。
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
     env_file:
       - ./ai-company.env
     volumes:

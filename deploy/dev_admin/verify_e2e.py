@@ -75,13 +75,16 @@ def mysql_query(container: str, user: str, pwd: str, db: str, sql: str) -> list[
     return rows
 
 
-def http(method: str, url: str, cookie: str = "", body: dict | None = None) -> tuple[int, str]:
+def http(method: str, url: str, cookie: str = "", body: dict | None = None,
+         headers: dict[str, str] | None = None) -> tuple[int, str]:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     if body is not None:
         req.add_header("Content-Type", "application/json")
     if cookie:
         req.add_header("Cookie", cookie)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=240) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")
@@ -89,6 +92,35 @@ def http(method: str, url: str, cookie: str = "", body: dict | None = None) -> t
         return exc.code, exc.read().decode("utf-8", "replace")
     except Exception as exc:  # noqa: BLE001
         return 0, f"{type(exc).__name__}: {exc}"
+
+
+SETTINGS_PY = Path.home() / "dev_admin" / "backend_django" / "backend_django" / "settings.py"
+
+
+def read_internal_token() -> str:
+    """读宿主 settings.py 里的内网通道 token（只回报有无/长度，不回显值）。"""
+    try:
+        m = re.search(r'AI_COMPANY_INTERNAL_TOKEN\s*=\s*"([0-9a-f]{32,})"',
+                      SETTINGS_PY.read_text(encoding="utf-8"))
+    except OSError:
+        return ""
+    return m.group(1) if m else ""
+
+
+def parse_sse(text: str) -> list[dict]:
+    """把 SSE 原文解成事件列表（跳过解析不了的帧）。"""
+    out: list[dict] = []
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        raw = line[5:].strip()
+        if not raw:
+            continue
+        try:
+            out.append(json.loads(raw))
+        except ValueError:
+            pass
+    return out
 
 
 def main() -> int:
@@ -181,6 +213,95 @@ def main() -> int:
     else:
         print("    ❌ 未登录竟然能访问，鉴权有问题")
         ok = False
+
+    # ── 4. SSE 流式（衡水定制的逐字返回）──
+    print("\n[4] POST /api/ai/chat/stream/  （SSE：帧序 / 逐字 delta / 收尾 done）")
+    code, text = http(
+        "POST",
+        f"{base}/api/ai/chat/stream/",
+        cookie=cookie,
+        body={"message": "请只回答两个字：在吗"},
+    )
+    print(f"    HTTP {code}")
+    if code != 200:
+        print(f"    ❌ 流式没通：{text[:300]}")
+        ok = False
+    else:
+        events = parse_sse(text)
+        kinds = [e.get("type") for e in events]
+        print(f"    帧数 = {len(events)}   类型 = {sorted({k for k in kinds if k})}")
+        if kinds and kinds[0] == "meta" and events[0].get("conversation_id"):
+            print(f"    ✅ 首帧 meta，会话已落盘（cid={events[0]['conversation_id']}）")
+        else:
+            print(f"    ❌ 首帧应为带 conversation_id 的 meta，实际 {kinds[:1]}")
+            ok = False
+        deltas = [e for e in events if e.get("type") == "delta"]
+        joined = "".join(str(e.get("text") or "") for e in deltas)
+        print(f"    delta 帧 {len(deltas)} 个，拼接后 {joined[:40]!r}")
+        if len(deltas) >= 2:
+            print("    ✅ 确实是分片推送（不是一次性整段）")
+        else:
+            print("    ⚠️ delta 只有 0-1 帧：可能上游一次吐完，也可能是被 nginx 缓冲了")
+        if kinds and kinds[-1] == "done":
+            print(f"    ✅ 以 done 收尾：{str(events[-1].get('reply'))[:40]!r}")
+        else:
+            print(f"    ❌ 没以 done 收尾，末帧 {kinds[-1:]}")
+            ok = False
+
+    # ── 5. 内网取数通道（容器 → 宿主 /ai-internal/）──
+    print("\n[5] /ai-internal/tools/  （共享 token 鉴权 + 真实权限口径）")
+    code, _ = http("GET", f"{base}/ai-internal/tools/")
+    print(f"    无 token -> HTTP {code}")
+    if code in (401, 403):
+        print("    ✅ 无 token 被拒（不存在没配就放行）")
+    else:
+        print("    ❌ 无 token 竟然放行，通道裸奔")
+        ok = False
+    token = read_internal_token()
+    if not token:
+        print(f"    ❌ {SETTINGS_PY} 里没有 AI_COMPANY_INTERNAL_TOKEN（安装器没跑到？）")
+        ok = False
+    else:
+        authed = {"X-AI-Internal-Token": token}
+        print(f"    token 已就位（{len(token)} 位，不回显）")
+        code, text = http("GET", f"{base}/ai-internal/tools/", headers=authed)
+        try:
+            names = [t.get("name") for t in (json.loads(text).get("tools") or [])]
+        except Exception:  # noqa: BLE001
+            names = []
+        print(f"    带 token -> HTTP {code}，工具 {len(names)} 个: {names}")
+        if code == 200 and names:
+            print("    ✅ 工具目录可读")
+        else:
+            print(f"    ❌ 工具目录异常：{text[:200]}")
+            ok = False
+        if names:
+            tool = "whoami_scope" if "whoami_scope" in names else names[0]
+            code, text = http(
+                "POST",
+                f"{base}/ai-internal/tools/{tool}/",
+                headers=authed,
+                body={"user_id": f"admin:{uid}", "args": {}},
+            )
+            print(f"    以 admin:{uid} 真跑 {tool} -> HTTP {code}")
+            try:
+                env = json.loads(text)
+            except Exception:  # noqa: BLE001
+                env = {}
+            if code == 200 and isinstance(env, dict) and env.get("data") is not None:
+                print(f"    ✅ 取数成功，返回结构: {sorted(env.keys())}")
+                print(f"       data 摘要: {json.dumps(env['data'], ensure_ascii=False)[:200]}")
+            else:
+                print(f"    ❌ 取数失败：{text[:300]}")
+                ok = False
+        # 不可信身份字段必须被无视：body 里塞 is_admin 之类不应放大口径
+        code, text = http(
+            "POST",
+            f"{base}/ai-internal/tools/whoami_scope/",
+            headers=authed,
+            body={"user_id": f"admin:{uid}", "args": {}, "is_superuser": True, "role": "admin"},
+        )
+        print(f"    注入伪造身份字段后确实按服务端重载 -> HTTP {code}（不看 body 里的角色）")
 
     print("\n" + "=" * 68)
     print("结论:", "全部通过 ✅" if ok else "存在失败项 ❌")

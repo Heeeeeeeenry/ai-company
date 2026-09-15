@@ -40,8 +40,8 @@ CAPABILITIES = {
     "research": Capability(
         name="research",
         display="Research & Search",
-        description="Search the web, fetch web pages, query market data",
-        tools=["web_search", "web_fetch", "market_series"],
+        description="Search the web, fetch web pages, query market data and real-time weather",
+        tools=["web_search", "web_fetch", "market_series", "weather"],
     ),
     "coding": Capability(
         name="coding",

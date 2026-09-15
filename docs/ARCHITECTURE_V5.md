@@ -90,7 +90,7 @@ class CapabilityRegistry:
 ```python
 DEFAULT_CAPABILITIES = {
     "web_search": Capability(name="web_search", agent="ResearchAgent",
-        tools=["web_search", "web_fetch", "market_series"]),
+        tools=["web_search", "web_fetch", "market_series", "weather"]),
     "vision": Capability(name="vision", agent="VisionAgent",
         tools=["vision_analyze", "screenshot"]),
     "shell": Capability(name="shell", agent="SystemAgent",

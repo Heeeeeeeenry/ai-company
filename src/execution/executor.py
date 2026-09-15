@@ -447,6 +447,13 @@ TOOL_REGISTRY = {
         "cli_command": f"{sys.executable} -m src.execution._web_tool market_series {{query}} 30",
         "fallback": "web_search",
     },
+    "weather": {
+        "mcp_server": None,
+        "mcp_tool": None,
+        "cli_command": f"{sys.executable} -m src.execution._web_tool weather {{city}}",
+        "fallback": "web_search",
+        "description": "查城市实时天气+预报（中国天气网直连，open-meteo 兜底，均无需 key）",
+    },
     "web_fetch": {
         "mcp_server": None,
         "mcp_tool": None,
@@ -592,6 +599,7 @@ class ExecutionRouter:
                 "SEARCH FAILED",
                 "SEARCH BLOCKED",
                 "SEARCH DOWN",
+                "SEARCH UNAVAILABLE",  # Tavily 未安装时返回，曾被当成"成功"
                 "No results found",
             )
             if any(output.startswith(prefix) for prefix in failure_prefixes):
@@ -609,6 +617,17 @@ class ExecutionRouter:
                 "ERROR: Cannot decode response",
             )
             if any(output.startswith(prefix) for prefix in failure_prefixes):
+                return ToolResult(
+                    success=False,
+                    output=result.output,
+                    error=output.splitlines()[0][:200],
+                    mode=result.mode,
+                    metadata=result.metadata,
+                )
+        if tool_name == "weather":
+            # 只有两源都没拿到才算失败；"中国天气网取数失败…改用备用源"
+            # 之后可能仍取到数据，不能当失败。
+            if output.startswith("未能获取"):
                 return ToolResult(
                     success=False,
                     output=result.output,

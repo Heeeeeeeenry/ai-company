@@ -174,7 +174,14 @@ def test_research_alias():
 def test_get_tools_for_intent():
     """Intent → flat, deduplicated tool set."""
     research_tools = capability_registry.get_tools_for_intent("RESEARCH")
-    assert research_tools == {"web_search", "web_fetch", "market_series", "read_file", "write_file"}
+    assert research_tools == {
+        "web_search",
+        "web_fetch",
+        "market_series",
+        "weather",  # 天气直连数据源，不走 Tavily
+        "read_file",
+        "write_file",
+    }
 
     coding_tools = capability_registry.get_tools_for_intent("CODING")
     # coding → read_file/write_file/run_python/run_test/lint_code/git_commit
