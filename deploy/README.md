@@ -198,6 +198,16 @@ curl -s -o /dev/null -w '%{http_code}\n' http://dev-admin.hsmyzg.com/src/ai_comp
 #     再开两个浏览器/账号，各自会话互不可见（隔离）
 ```
 
+## 5.6 本地回归（不碰目标机）
+
+```bash
+bash deploy/dev_admin/tests/run.sh
+```
+
+两个纯本地测试，只需 node + python3：`widget_regression.mjs` 真导入 `widget.js`
+（DOM/storage/fetch 桩）验换用户三层自愈；`installer_regression.py` 在假 dev_admin
+上驱动安装器真 `main()`，验版本号标注、幂等、不写 `.bak`、git 回滚命令。
+
 ## 6. 回滚
 
 ```bash
