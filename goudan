@@ -12,7 +12,19 @@
 set -e
 
 # ─── Resolve project + Python (shared with goudan-api) ────────────────
-_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# 先解析出本脚本的**真实**路径（跟随软链）。BASH_SOURCE[0] 在通过软链调用时
+# 就是软链自身（bash 不会自动规范化），若直接对它取 dirname，在
+# ~/.local/bin/goudan -> <repo>/goudan 这种场景下会去找
+# ~/.local/bin/scripts/env.sh 而报 "No such file or directory"。
+_SELF="${BASH_SOURCE[0]}"
+while [ -L "$_SELF" ]; do
+    _LINK="$(readlink "$_SELF")"
+    case "$_LINK" in
+        /*) _SELF="$_LINK" ;;
+        *)  _SELF="$(cd "$(dirname "$_SELF")" && pwd -P)/$_LINK" ;;
+    esac
+done
+_SCRIPT_DIR="$(cd "$(dirname "$_SELF")" && pwd -P)"
 # shellcheck source=scripts/env.sh
 . "$_SCRIPT_DIR/scripts/env.sh"
 resolve_python
