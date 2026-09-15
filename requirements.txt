@@ -16,5 +16,8 @@ jieba>=0.42
 gnureadline>=8.0  # CJK multi-byte backspace fix on macOS
 Pillow>=10.0
 
+# 通用网络检索（web_search 后端；需 TAVILY_API_KEY）
+tavily-python>=0.5
+
 # Memory (engram-router — evidence-based SQLite memory)
 engram-router @ file:///Users/v_liheng02/work/test_code/for_test/engram-router

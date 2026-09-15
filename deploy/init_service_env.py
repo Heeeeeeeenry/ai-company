@@ -25,6 +25,13 @@ from pathlib import Path
 KEY_NAME = "AI_COMPANY_DEEPSEEK_API_KEY"
 SRC_ENV_KEYS = ("LLM_API_KEY", "DEEPSEEK_API_KEY", "AI_COMPANY_DEEPSEEK_API_KEY")
 
+# 可选键：缺失不阻塞部署（只警告）。用途：
+#   TAVILY_API_KEY —— 通用 web_search 的后端；不配则所有非 curated 搜索
+#   返回 SEARCH UNAVAILABLE（AI 会如实说明"检索不可用"）。
+OPTIONAL_KEYS: dict[str, tuple[str, ...]] = {
+    "TAVILY_API_KEY": ("TAVILY_API_KEY",),
+}
+
 
 def read_env(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
@@ -39,17 +46,26 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
-def find_source_key() -> tuple[str, str] | None:
-    """按优先级从宿主 .env 里找一把可用的 DeepSeek key。"""
+def find_source_key(names: tuple[str, ...] = SRC_ENV_KEYS) -> tuple[str, str] | None:
+    """按优先级从宿主 .env 里找一把可用的 key；找不到再看进程环境变量。
+
+    支持环境变量是为了让部署可以安全管理密钥而不落盘到 dev_admin：
+        printf '%s' "$KEY" | ssh host 'read -r K; TAVILY_API_KEY="$K" python3 init_service_env.py'
+    （用 stdin + shell 变量传递，密钥不会出现在 ssh 远端命令行/ps 里。）
+    """
     for candidate in (
         Path.home() / "dev_admin" / ".env",
         Path.home() / "dev_admin" / "backend_django" / ".env",
     ):
         env = read_env(candidate)
-        for name in SRC_ENV_KEYS:
+        for name in names:
             val = env.get(name, "")
             if val:
                 return str(candidate), val
+    for name in names:
+        val = os.environ.get(name, "")
+        if val:
+            return f"环境变量 ${name}", val
     return None
 
 
@@ -91,6 +107,25 @@ def main() -> int:
                 text = text.rstrip("\n") + f"\n{KEY_NAME}={key}\n"
             print(f"  已从 {src} 取 key（{len(key)} 字符）写入 {env_file}")
 
+    # ── 可选键：已填保持不动；未填尝试从宿主复用；仍无则留空并警告 ──
+    for key, src_names in OPTIONAL_KEYS.items():
+        cur = read_env(env_file).get(key, "")
+        if cur:
+            print(f"  {key} 已存在（{len(cur)} 字符），保持不动")
+            continue
+        found = find_source_key(src_names)
+        if found:
+            src, val = found
+            text = re.sub(rf"(?m)^{key}=.*$", f"{key}={val}", text)
+            if f"{key}=" not in text:
+                text = text.rstrip("\n") + f"\n{key}={val}\n"
+            print(f"  {key} 已从 {src} 复用（{len(val)} 字符）")
+        else:
+            if f"{key}=" not in text:
+                text = text.rstrip("\n") + f"\n{key}=\n"
+            print(f"  [警告] {key} 未配置 —— 通用 web_search 会返回 SEARCH UNAVAILABLE；")
+            print(f"         需要时请编辑 {env_file} 填 {key}=<key>")
+
     env_file.write_text(text, encoding="utf-8")
     os.chmod(env_file, stat.S_IRUSR | stat.S_IWUSR)  # 600：含密钥
 
@@ -103,6 +138,9 @@ def main() -> int:
     print(f"   base_url        : {final.get('AI_COMPANY_DEEPSEEK_BASE_URL', '(缺)')}")
     print(f"   model           : {final.get('AI_COMPANY_DEEPSEEK_MODEL', '(缺)')}")
     print(f"   key             : {'已设置 ' + str(len(k)) + ' 字符' if k else '**缺失**'}")
+    for key in OPTIONAL_KEYS:
+        v = final.get(key, "")
+        print(f"   {key:<16}: {'已设置 ' + str(len(v)) + ' 字符' if v else '(未配置，通用搜索不可用)'}")
     print(f"   env 文件权限    : {oct(env_file.stat().st_mode)[-3:]}")
     return 0 if k else 1
 

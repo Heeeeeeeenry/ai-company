@@ -452,6 +452,9 @@ TOOL_REGISTRY = {
         "mcp_tool": None,
         "cli_command": f"{sys.executable} -m src.execution._web_tool weather {{city}}",
         "fallback": "web_search",
+        # 参数名不同，必须显式翻译：weather 的 {city} → web_search 的 {query}。
+        # 不写这行，fallback 会带着 {city} 去跑 search 的 {query} → KeyError → 假错误级联。
+        "fallback_params": {"query": "{city} 天气"},
         "description": "查城市实时天气+预报（中国天气网直连，open-meteo 兜底，均无需 key）",
     },
     "web_fetch": {
@@ -1133,7 +1136,22 @@ Keep responses concise."""
                 if tool_name == "web_search" and fallback_name == "web_fetch":
                     if "query" in fallback_params and "url" not in fallback_params:
                         fallback_params["url"] = f"https://html.duckduckgo.com/html/?q={fallback_params['query']}"
-                return await self.execute_tool(fallback_name, fallback_params, prefer_mcp=False)
+                # 显式参数翻译：如 weather 的 {city} → web_search 的 {query}
+                for key, tpl in (tool_def.get("fallback_params") or {}).items():
+                    try:
+                        fallback_params[key] = tpl.format(**params)
+                    except KeyError:
+                        pass
+                # 只有当 fallback 工具**真正需要的占位符**都齐了才递归。
+                # 否则参数对不上 → `.format()` 抛 KeyError → 生成
+                # "Missing parameter 'url'" 这类与事实无关的假错误，并且会沿着
+                # fallback 链继续级联（weather → web_search → web_fetch），
+                # 把"一次取数失败"变成一串莫名其妙报错，模型只能原样转述。
+                slots = set(
+                    re.findall(r"\{(\w+)\}", TOOL_REGISTRY.get(fallback_name, {}).get("cli_command", ""))
+                )
+                if slots <= set(fallback_params):
+                    return await self.execute_tool(fallback_name, fallback_params, prefer_mcp=False)
 
         return result
 

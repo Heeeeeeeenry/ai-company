@@ -31,6 +31,12 @@ jieba>=0.42
 Pillow>=10.0
 PyYAML>=6.0
 
+# 通用网络检索后端（src/execution/_web_tool.py 的 web_search 走 Tavily）。
+# 原先漏装 → 非 curated 的所有搜索都返回 "SEARCH UNAVAILABLE"，
+# 且该前缀不在失败列表里，会被当成"工具成功"，模型只能自己打圆场。
+# 需配 TAVILY_API_KEY（见 ai-company.env.example）。
+tavily-python>=0.5
+
 # CLI 相关（部分模块在 import 期即引用）
 prompt_toolkit>=3.0
 psutil>=5.9

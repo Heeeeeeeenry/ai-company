@@ -443,3 +443,55 @@ def test_weather_all_sources_down_reports_failure(monkeypatch):
 
     out = _web_tool.weather("衡水")
     assert out.startswith("未能获取 衡水")
+
+
+def test_web_search_weather_falls_through_to_search_when_curated_fails(monkeypatch):
+    """快路（直连天气源）失败时必须放行给通用搜索兜底，不能把失败当答案返回。
+
+    实测背景：中国天气网的城市检索索引里没有"衡水"（toy1 直接返回 `()`），
+    所以默认城市的天气快路是**会失败**的。若失败时直接 return，
+    就会把"本来答得上"的问题变成"取不到"——这正是最初那个"答得不好"的形态。
+    """
+    from src.execution import _web_tool
+
+    monkeypatch.setattr(
+        _web_tool,
+        "weather",
+        lambda city="": f"未能获取 {city} 的天气数据：中国天气网无编码、open-meteo 也无结果",
+    )
+
+    class _FakeClient:
+        def search(self, query, max_results=5, search_depth="basic", include_answer=True):
+            return {
+                "answer": "衡水今天晴，最高 28°C",
+                "results": [
+                    {
+                        "title": "衡水天气预报",
+                        "url": "https://www.weather.com.cn/",
+                        "content": "衡水 晴 28°C",
+                        "score": 0.9,
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(_web_tool, "_get_tavily", lambda: _FakeClient())
+
+    out = _web_tool.web_search("衡水今天天气")
+
+    assert "未能获取" not in out, "快路失败被当成最终答案返回了"
+    assert "Answer:" in out, "没落到通用搜索分支"
+    assert "28°C" in out
+
+
+def test_web_search_weather_keeps_curated_when_available(monkeypatch):
+    """快路可用时仍走快路（精确数值 + 无搜索成本）。"""
+    from src.execution import _web_tool
+
+    monkeypatch.setattr(_web_tool, "weather", lambda city="": f"FAKE_WEATHER[{city}]")
+    monkeypatch.setattr(
+        _web_tool,
+        "_get_tavily",
+        lambda: (_ for _ in ()).throw(AssertionError("不该走到通用搜索")),
+    )
+
+    assert _web_tool.web_search("衡水今天天气") == "FAKE_WEATHER[衡水]"

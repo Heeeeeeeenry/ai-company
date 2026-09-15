@@ -42,10 +42,14 @@ def web_search(query: str, max_results: int = 5) -> str:
     query_lower = query.lower()
     curated = None
 
-    # 天气：直连数据接口。网页是 JS 壳，Tavily 也给不了实时气温，
-    # 所以这里必须短路到 weather()，不能落到下面的 Tavily 分支。
+    # 天气：直连数据接口能给出精确数值（搜索结果通常只有 SEO 套话、没有实时气温），
+    # 所以作为**快路**先试。但它依赖无文档的第三方城市索引，会漏城市
+    # （实测 toy1 索引里没有"衡水"）——失败时绝不能直接返回，必须放行给下方
+    # 通用搜索兜底；否则快路自身的故障会把"本来答得上"的问题变成"取不到"。
     if _vre.search(r"天气|气温|降雨|下雨|台风|空气质量|weather", query_lower):
-        return weather(_extract_city(query))
+        got = weather(_extract_city(query))
+        if not got.startswith("未能获取"):
+            return got
 
     if _vre.search(r"gold|金价|黄金|gold price", query_lower):
         curated = (

@@ -129,6 +129,20 @@ docker logs --tail 30 ai-company
 2. 角色级 `*_MODEL=deepseek-v4-flash` —— 不设会回落到 `config.py` 里 `gpt-5.5`
    的默认值，本环境打不通。
 
+可选但强烈建议：
+
+3. `TAVILY_API_KEY` —— **通用 `web_search` 的后端**。不配 = 所有非 curated 检索
+   返回 `SEARCH UNAVAILABLE`（AI 会如实说"检索不可用"，问天气之类的长尾问题直接答不了）。
+   容器依赖是 `tavily-python`（在 `deploy/requirements.docker.txt`，**不在**仓库根
+   `requirements.txt` —— 两处都要有）。密钥可用 stdin 注入而不落盘到 dev_admin：
+
+```bash
+awk -F= '/^TAVILY_API_KEY=/{print substr($0,index($0,"=")+1)}' .env | tr -d '"' \
+  | ssh -p 60022 my@222.223.144.110 \
+      'read -r K; cd ~/ai-company && TAVILY_API_KEY="$K" python3 init_service_env.py --dir ~/ai-company'
+# 之后 docker compose up -d 重建容器才会把新变量带进去
+```
+
 ## 4. 接入 dev_admin
 
 一键：
