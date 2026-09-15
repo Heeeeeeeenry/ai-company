@@ -20,8 +20,22 @@ resolve_python
 # ─── Run ───────────────────────────────────────────────────────────────
 cd "$AI_COMPANY_DIR"
 
-if [ $# -gt 0 ]; then
-    exec "$PYTHON" -m src.main "$@"
+# ─── 参数适配 ─────────────────────────────────────────────────────────
+# src.main 的 argparse 只接受 --query / --mode {telegram,cli} 等**具名**标志，
+# 不接受位置参数（直接 `goudan "文本"` 会报 "unrecognized arguments"）。
+# 这里把本脚本文档化的简写翻成真实接口，避免踩坑：
+#   goudan                  → --mode cli
+#   goudan "文本"           → --query "文本"
+#   goudan --telegram       → --mode telegram
+#   goudan <其它标志...>    → 原样透传
+if [ $# -eq 0 ]; then
+    set -- --mode cli
 else
-    exec "$PYTHON" -m src.main --mode cli
+    case "$1" in
+        --telegram) set -- --mode telegram "${@:2}" ;;
+        -*)         : ;;                          # 已是合法标志，原样透传
+        *)          set -- --query "$1" "${@:2}" ;;
+    esac
 fi
+
+exec "$PYTHON" -m src.main "$@"
