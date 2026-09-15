@@ -38,6 +38,40 @@ def get_client() -> AiCompanyClient:
     )
 
 
+def _host_user(request):
+    """尽力从宿主登录态里取出用户主键，取不到返回 None。
+
+    兼容三种宿主，按「零额外开销优先」的顺序探测：
+
+    1. ``request.session_user`` —— 民意智感中心管理端（dev_admin）的
+       SessionAuthMiddleware 会把登录用户 dict 挂在这里，无额外 DB 开销。
+    2. ``request.user`` —— 通用 Django（contrib.auth）。
+    3. dev_admin 的 ``api.common.auth.get_request_session_user(request)`` ——
+       兜底：当端点不在 ``/api/`` 前缀下、中间件没跑时的补救路径。
+    """
+    info = getattr(request, "session_user", None)
+    if isinstance(info, dict):
+        pk = info.get("id") or info.get("user_id")
+        if pk:
+            return pk
+
+    user = getattr(request, "user", None)
+    if user is not None and getattr(user, "is_authenticated", False):
+        return user.pk
+
+    try:
+        from api.common.auth import get_request_session_user
+    except Exception:
+        return None
+    try:
+        info = get_request_session_user(request)
+    except Exception:
+        return None
+    if isinstance(info, dict):
+        return info.get("id") or info.get("user_id")
+    return None
+
+
 def resolve_user_id(request) -> str:
     """由宿主登录态推导 ai-company 的 user_id。
 
@@ -55,7 +89,7 @@ def resolve_user_id(request) -> str:
             raise PermissionError("AI_COMPANY_USER_ID_RESOLVER 返回了空 user_id")
         return uid
 
-    user = getattr(request, "user", None)
-    if user is None or not user.is_authenticated:
+    pk = _host_user(request)
+    if not pk:
         raise PermissionError("未登录：ai-company 依赖宿主的登录态")
-    return f"{conf('AI_COMPANY_USER_PREFIX')}:{user.pk}"
+    return f"{conf('AI_COMPANY_USER_PREFIX')}:{pk}"

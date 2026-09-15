@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────
+# ai-company (狗蛋儿) 服务端 —— 嵌入式部署（民意智感中心管理端 / dev_admin）
+#
+# 目标机：222.223.144.110（zhiwei-svr，用户 my，x86_64）
+# 部署目录：/home/my/ai-company/
+#
+#   1) 准备环境变量
+#        cp ai-company.env.example ai-company.env
+#        vi ai-company.env          # 填 DEEPSEEK_API_KEY（复用 dev_admin 那把）
+#   2) 起服务
+#        docker compose up -d
+#   3) 自检
+#        curl -s http://127.0.0.1:8020/ai/health
+#
+# 关键点：
+#   * 端口只绑 127.0.0.1 —— 不对公网暴露，只给同机的 dev_admin(uvicorn) 调用。
+#   * 镜像来自阿里云 ACR（该机 Docker Hub 不可达；daocloud 镜像源仅供 base 层）。
+#   * 数据卷 ./data -> /data：HOME=/data，所以 multiuser.db / service_sessions /
+#     engram 记忆库都落在宿主机，容器重建不丢历史。
+# ─────────────────────────────────────────────────────────────────────
+
+services:
+  ai-company:
+    image: crpi-bqbwg1s59o0fx9ln.cn-beijing.personal.cr.aliyuncs.com/letter/ai-company:latest
+    container_name: ai-company
+    restart: unless-stopped
+    platform: linux/amd64
+    # 目标机打不通 Docker Hub、也没有 ACR 登录态（~/.docker/config.json 不存在），
+    # 所以镜像不走 registry 拉取，而是从开发机流式灌入：
+    #   docker save <img> | gzip -1 | ssh -p 60022 my@<host> 'gunzip | docker load'
+    # pull_policy: never 让 compose 直接用本地已有的镜像，不去联网。
+    pull_policy: never
+    ports:
+      - '127.0.0.1:8020:8020'
+    env_file:
+      - ./ai-company.env
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'

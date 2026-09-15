@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────
+# ai-company 容器内依赖（Linux / amd64）
+#
+# 与仓库根 requirements.txt 的关系：
+#   1. 去掉 gnureadline —— 它是 macOS 专有包，Linux 装不上（代码里是 try/except 可选依赖）
+#   2. engram-router 不在 PyPI，改为镜像内 `pip install ./vendor/engram-router`（见 Dockerfile）
+#   3. 补上 api_server 真正需要的 fastapi / uvicorn（原 requirements.txt 漏了）
+#   4. 按 src/ 实际 import 反解出 langchain-anthropic / pyyaml / prompt_toolkit / psutil
+#   5. 不装 python-telegram-bot —— 只有 CLI 入口 src/main.py 用，服务进程不 import
+# ─────────────────────────────────────────────────────────────────────
+
+# HTTP 适配层（src/api_server.py）
+fastapi>=0.110
+uvicorn>=0.27
+
+# LLM / Agent 编排
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-anthropic>=0.2.0
+openai>=1.40
+pydantic>=2.0
+
+# 工具与输出
+python-dotenv>=1.0
+rich>=13.0
+structlog>=24.0
+tenacity>=8.0
+jieba>=0.42
+Pillow>=10.0
+PyYAML>=6.0
+
+# CLI 相关（部分模块在 import 期即引用）
+prompt_toolkit>=3.0
+psutil>=5.9
+
+# engram-router 的模块级硬依赖
+# 其余 faiss / torch / sentence_transformers / hanlp / tree_sitter /
+# prometheus_client / psycopg2 等均为函数内惰性 import，服务路径用不到，
+# 不装（否则镜像会因 torch 等体积膨胀数 GB）。见 vendor 源码 import 审计。
+numpy>=1.26

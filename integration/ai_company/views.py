@@ -18,13 +18,27 @@ from __future__ import annotations
 import json
 from functools import wraps
 
+from django.conf import settings
 from django.http import JsonResponse
 from django.shortcuts import render
-from django.views.decorators.csrf import ensure_csrf_cookie
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_http_methods
 
 from .client import AiCompanyError
 from .conf import get_client, resolve_user_id
+
+
+def maybe_csrf_exempt(view):
+    """按宿主约定决定是否豁免 CSRF。
+
+    默认不豁免（Django 原生行为）。当宿主整个 JSON API 面都是
+    ``csrf_exempt``、前端又只靠 Cookie 认证、从不发 CSRF token 时
+    （例如民意智感中心管理端的 ``/api/llm/``），在宿主 settings 里设
+    ``AI_COMPANY_CSRF_EXEMPT = True`` 即可对齐，否则 POST 一律 403。
+    """
+    if getattr(settings, "AI_COMPANY_CSRF_EXEMPT", False):
+        return csrf_exempt(view)
+    return view
 
 
 def _json_body(request) -> dict:
@@ -67,6 +81,7 @@ def page(request):
 
 # ─── 会话 ────────────────────────────────────────────────────────────
 
+@maybe_csrf_exempt
 @require_http_methods(["GET", "POST"])
 @embedded
 def sessions(request, uid):
@@ -78,6 +93,7 @@ def sessions(request, uid):
     return JsonResponse(created, status=201)
 
 
+@maybe_csrf_exempt
 @require_http_methods(["GET", "DELETE"])
 @embedded
 def session_detail(request, uid, conversation_id):
@@ -89,6 +105,7 @@ def session_detail(request, uid, conversation_id):
 
 # ─── 对话 ────────────────────────────────────────────────────────────
 
+@maybe_csrf_exempt
 @require_http_methods(["POST"])
 @embedded
 def chat(request, uid):
