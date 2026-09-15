@@ -90,26 +90,44 @@ class SessionAwareMemory:
                     self._global = EngramBackend(session_id=None)
         return self._global
 
+    def _backend_for(self, sid: str) -> Any:
+        if sid not in self._backends:
+            with self._lock:
+                if sid not in self._backends:
+                    from src.memory.engram_backend import EngramBackend
+                    logger.info("Creating per-session backend: %s", sid)
+                    self._backends[sid] = EngramBackend(session_id=sid)
+        return self._backends[sid]
+
     def _resolve_backend(self) -> Any:
-        """Return the backend for the currently active session.
+        """Return the backend for the currently active conversation.
+
+        Resolution order:
+          1. explicit request scope (``src.session.scope``) — set by the HTTP
+             layer for every embedded request.  Wins because in a multi-user
+             service the process-wide SessionManager is shared and must not be
+             consulted per-request.
+          2. SessionManager.current — the local CLI's active session.
+          3. global backend (shared rules only).
 
         If no session is active, falls back to the global backend.
-        Captures session object atomically to avoid TOCTOU between
-        existence check and id read.
         """
+        # 1. Explicit per-request scope (multi-user embedding).
+        try:
+            from src.session.scope import current_scope
+            scoped = current_scope()
+            if scoped:
+                return self._backend_for(str(scoped))
+        except Exception:
+            pass
+
+        # 2. Local CLI session.
         try:
             from src.session.manager import get_session_manager
             sm = get_session_manager()
             current = sm.current  # Atomic capture — P1-1 fix
             if current is not None:
-                sid = current.id
-                if sid not in self._backends:
-                    with self._lock:
-                        if sid not in self._backends:
-                            from src.memory.engram_backend import EngramBackend
-                            logger.info("Creating per-session backend: %s", sid)
-                            self._backends[sid] = EngramBackend(session_id=sid)
-                return self._backends[sid]
+                return self._backend_for(current.id)
         except Exception:
             pass
         return self._get_global()
@@ -163,8 +181,24 @@ class SessionAwareMemory:
         return self._resolve_backend().get_memory_context()
 
     def get_full_context(self) -> str:
-        """Build full context: global rules + session-private memories."""
+        """Build full context: global rules + session-private memories.
+
+        Important: when the caller is an embedded request bound to an explicit
+        conversation scope, the *global* namespace is NOT injected.  That
+        namespace holds the deployer's own local CLI memories — private data that
+        must never appear in a third-party user's chat.  Within a scoped request
+        only the conversation's own memories are visible.
+        """
         backend = self._resolve_backend()
+
+        # Explicit scope → conversation-private only (see docstring).
+        try:
+            from src.session.scope import current_scope
+            if current_scope():
+                return backend.get_full_context()
+        except Exception:
+            pass
+
         # For per-session backends, also include global context
         if backend.session_id is not None:
             global_part = self._get_global().get_full_context()

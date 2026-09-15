@@ -1,10 +1,22 @@
 """Session Memory — per-session persistent memory + global shared memory.
 
 Session memory: ~/.ai-company/sessions/<session_id>/memory.json
+Service memory: ~/.ai-company/service_sessions/<conversation_id>/memory.json
 Global memory: ~/.ai-company/global_memory.json
 
 Session memory is unique to each session (conversation-specific facts).
 Global memory is shared across all sessions (principles, configs, rules).
+
+Multi-user embedding
+--------------------
+When ``AI_COMPANY_SERVICE_MODE=1`` the process serves third-party users, so the
+two single-user assumptions above are unsafe:
+
+* embedded conversations live under a *separate* root, so they can never mix
+  with the deployer's own CLI sessions;
+* ``get_session_memory`` refuses to read another conversation's file while a
+  request scope is bound — a request scoped to conversation C must never see
+  conversation D's facts, however the caller obtained D's id.
 """
 
 import json
@@ -16,9 +28,26 @@ from threading import Lock
 # Paths
 GLOBAL_MEMORY_FILE = os.path.expanduser("~/.ai-company/global_memory.json")
 SESSION_DIR = os.path.expanduser("~/.ai-company/sessions")
+SERVICE_SESSION_DIR = os.environ.get(
+    "AI_COMPANY_SERVICE_SESSION_DIR",
+    os.path.expanduser("~/.ai-company/service_sessions"),
+)
+
+
+def service_mode() -> bool:
+    """True when this process serves embedded third-party users."""
+    return os.environ.get("AI_COMPANY_SERVICE_MODE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _session_root() -> str:
+    """Root directory for conversation memories (service vs. local CLI)."""
+    return SERVICE_SESSION_DIR if service_mode() else SESSION_DIR
+
 
 def _session_memory_path(session_id: str) -> str:
-    return os.path.join(SESSION_DIR, session_id, "memory.json")
+    return os.path.join(_session_root(), session_id, "memory.json")
 
 
 class SessionMemory:
@@ -33,12 +62,14 @@ class SessionMemory:
     
     MAX_HISTORY = 50  # Keep last N conversation turns
     
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, persist: bool = True):
         self.session_id = session_id
+        self._persist = persist
         self._data: dict = {}
         self._conversations: list[dict] = []
         self._lock = Lock()
-        self._load()
+        if persist:
+            self._load()
     
     def _load(self):
         path = _session_memory_path(self.session_id)
@@ -53,6 +84,10 @@ class SessionMemory:
                 self._conversations = []
     
     def _save(self):
+        # Detached memories (cross-scope refusals) must never hit disk — writing
+        # them would create files for conversations this request does not own.
+        if not self._persist:
+            return
         path = _session_memory_path(self.session_id)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with self._lock:
@@ -188,8 +223,38 @@ def get_global_memory() -> GlobalMemory:
         _global_memory = GlobalMemory()
     return _global_memory
 
+def _current_scope_safe() -> Optional[str]:
+    """Conversation scope bound to the current request, if any."""
+    try:
+        from src.session.scope import current_scope
+        return current_scope()
+    except Exception:
+        return None
+
+
+def session_memory_path(session_id: str) -> str:
+    """Absolute path of a session's memory.json (honours service mode)."""
+    return os.path.join(_session_root(), session_id, "memory.json")
+
+
 def get_session_memory(session_id: str) -> SessionMemory:
+    """Return the memory store for ``session_id``.
+
+    Isolation invariant: while a request is scoped to conversation C, asking for
+    any other conversation's memory returns a detached empty store instead of
+    that conversation's facts.  Without this, a stale id picked up from a global
+    (e.g. the CLI's ``SessionManager.current``) would silently inject another
+    user's private data into the reply.
+    """
     global _session_memories
+    bound = _current_scope_safe()
+    if bound and str(session_id) != str(bound):
+        return SessionMemory(f"__blocked__{session_id}", persist=False)
     if session_id not in _session_memories:
         _session_memories[session_id] = SessionMemory(session_id)
     return _session_memories[session_id]
+
+
+def forget_session_memory(session_id: str) -> None:
+    """Drop a session's cached memory (call when the conversation is deleted)."""
+    _session_memories.pop(session_id, None)

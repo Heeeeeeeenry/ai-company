@@ -1,0 +1,18 @@
+{% load static %}<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 助手</title>
+  <link rel="stylesheet" href="{% static 'ai_company/ai_company.css' %}">
+  <style>
+    html, body { height: 100%; margin: 0; background: #ffffff; }
+    .ac-page-wrap { height: 100%; padding: 16px; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <div class="ac-page-wrap">
+    {% include "ai_company/_widget.html" %}
+  </div>
+</body>
+</html>

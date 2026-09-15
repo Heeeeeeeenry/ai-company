@@ -104,9 +104,13 @@ def get_llm(role: str = "ceo", model_tier: str = "") -> BaseChatModel:
             "qa": 4096, "devops": 4096, "pm": 2048, "architect": 2048,
             "ceo": 2048, "review": 2048,
         }
+        # 凭证按端点解析：内网 OneAPI 用 ONEAPI_API_KEY，DeepSeek 官方端点
+        # 用 DEEPSEEK_API_KEY。拿错一把 key 会必然 401。
+        from src.model_config import resolve_api_key
+        api_key = resolve_api_key(runtime_model.base_url, mc.provider) or config.oneapi_api_key
         return ChatOpenAI(
             model=model_name,
-            api_key=config.oneapi_api_key,
+            api_key=api_key,
             base_url=runtime_model.base_url,
             timeout=180 if is_reasoner else 60,
             max_retries=2,

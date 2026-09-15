@@ -1,0 +1,49 @@
+{% load static %}
+{% comment %}
+  ── ai-company 对话组件 ────────────────────────────────────────────
+  用法 A（整页）：访问 <挂载前缀>/page/
+  用法 B（嵌到已有页面）：
+      {% load static %}
+      <link rel="stylesheet" href="{% static 'ai_company/ai_company.css' %}">
+      {% include "ai_company/_widget.html" %}
+  组件高度跟随容器，容器需要有确定高度（如 height:100%）。
+  URL 通过 data-* 传给 JS，不要在 JS 里硬编码路径。
+
+  注意：本文件的注释必须用 comment/endcomment 块标签包裹，不要用花括号井号 ——
+  后者是单行注释，跨行书写会让注释里的 include 被真正执行（自我递归）。
+{% endcomment %}
+<div class="acapp" data-ai-company
+     data-api-sessions="{% url 'ai_company:sessions' %}"
+     data-api-chat="{% url 'ai_company:chat' %}"
+     data-api-session-detail="{% url 'ai_company:session_detail' conversation_id='__CID__' %}">
+
+  <aside class="ac-side">
+    <div class="ac-side-head">
+      <span class="ac-side-title">会话</span>
+      <button type="button" class="ac-newbtn" data-act="new">+ 新对话</button>
+    </div>
+    <div class="ac-list" data-role="list"></div>
+  </aside>
+
+  <section class="ac-main">
+    <header class="ac-head">
+      <span class="ac-dot" data-role="dot"></span>
+      <h3 data-role="title">AI 助手</h3>
+      <span class="ac-status" data-role="status"></span>
+    </header>
+
+    <div class="ac-msgs" data-role="msgs">
+      <div class="ac-empty">
+        <b>开始一段新对话</b>
+        <span>左侧可创建多个互不干扰的会话</span>
+      </div>
+    </div>
+
+    <div class="ac-composer">
+      <textarea class="ac-input" rows="1" data-role="input"
+                placeholder="输入内容，Enter 发送 / Shift+Enter 换行"></textarea>
+      <button type="button" class="ac-send" data-act="send">发送</button>
+    </div>
+  </section>
+</div>
+<script src="{% static 'ai_company/ai_company.js' %}"></script>

@@ -13,6 +13,9 @@
 #   AI_COMPANY_API_PORT=9000 goudan-api
 #
 # Env overrides: AI_COMPANY_API_HOST, AI_COMPANY_API_PORT
+#
+# Service mode is forced on: this process serves third-party users, so it must
+# not inherit the local CLI's active session/memory (see src/session/scope.py).
 
 set -e
 
@@ -24,4 +27,5 @@ resolve_python
 
 # ─── Run API server ────────────────────────────────────────────────────
 cd "$AI_COMPANY_DIR"
+export AI_COMPANY_SERVICE_MODE="${AI_COMPANY_SERVICE_MODE:-1}"
 exec "$PYTHON" -m src.api_server "$@"

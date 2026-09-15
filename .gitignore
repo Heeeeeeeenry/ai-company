@@ -44,4 +44,5 @@ skills/nihaisha/
 
 # 敏感备份与测试产物
 .env*
+!.env.example
 *.bak_*

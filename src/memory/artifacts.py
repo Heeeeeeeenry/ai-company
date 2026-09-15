@@ -33,12 +33,39 @@ DEFAULT_WORKSPACE = os.environ.get(
 
 
 class ArtifactStore:
-    """Key-value store backed by JSON files in a shared workspace."""
+    """Key-value store backed by JSON files in a shared workspace.
+
+    Storage is scoped by the current conversation (``src.session.scope``):
+
+    * scoped   → ``<workspace>/artifacts/<conversation_id>/``
+    * unscoped → ``<workspace>/artifacts/``  (legacy single-user CLI layout)
+
+    Scoping is what keeps an embedded multi-user deployment from reading another
+    user's (or another chat's) artifacts: ``list_all()`` only ever walks the
+    current scope's directory.
+    """
 
     def __init__(self, workspace: str = DEFAULT_WORKSPACE):
         self.workspace = workspace
-        self._dir = os.path.join(workspace, "artifacts")
-        os.makedirs(self._dir, exist_ok=True)
+        self._base = os.path.join(workspace, "artifacts")
+        os.makedirs(self._base, exist_ok=True)
+
+    # ── Scope resolution ──────────────────────────────────────────────
+
+    @property
+    def _dir(self) -> str:
+        """Directory for the currently active conversation scope."""
+        try:
+            from src.session.scope import current_scope
+            cid = current_scope()
+        except Exception:
+            cid = None
+        if not cid:
+            return self._base
+        safe = str(cid).replace("/", "_").replace("..", "_")
+        path = os.path.join(self._base, safe)
+        os.makedirs(path, exist_ok=True)
+        return path
 
     def _path(self, key: str) -> str:
         safe = key.replace("/", "_").replace("..", "_")
@@ -76,12 +103,13 @@ class ArtifactStore:
         return record["data"] if record else None
 
     def keys(self) -> list[str]:
-        """List all saved artifact keys."""
-        if not os.path.exists(self._dir):
+        """List artifact keys visible to the current scope."""
+        d = self._dir
+        if not os.path.exists(d):
             return []
         return sorted(
             f.replace(".json", "")
-            for f in os.listdir(self._dir)
+            for f in os.listdir(d)
             if f.endswith(".json")
         )
 

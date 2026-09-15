@@ -40,6 +40,13 @@ class SessionManager:
         os.makedirs(SESSION_DIR, exist_ok=True)
         self._current: Optional[Session] = None
         self._sessions: dict[str, Session] = {}
+        from src.session.memory import service_mode
+        # Service mode (embedded multi-user): never pick or create a "current"
+        # session.  Both fallbacks below would otherwise hand the service a
+        # conversation it does not own — leaking that session's memories into
+        # every user's reply, and writing a stray "default" session to disk.
+        if service_mode():
+            return
         self._load_all()
         # Auto-resume last active session, or create default
         if not self._current:
@@ -62,9 +69,18 @@ class SessionManager:
         return os.path.join(self._session_dir(session_id), "metadata.json")
     
     def _load_all(self):
-        """Load all sessions from disk."""
+        """Load all sessions from disk.
+
+        In service mode (``AI_COMPANY_SERVICE_MODE=1``) no disk session is
+        re-activated: this process serves third-party users, so "the current
+        session" must stay unset rather than silently pointing at whatever the
+        deployer last used in the CLI.  Leaving it set is how a personal CLI
+        session's memories leak into an embedded user's reply.
+        """
         if not os.path.exists(SESSION_DIR):
             return
+        from src.session.memory import service_mode
+        auto_activate = not service_mode()
         for sid in os.listdir(SESSION_DIR):
             path = self._metadata_path(sid)
             if os.path.exists(path):
@@ -73,7 +89,7 @@ class SessionManager:
                         data = json.load(f)
                     session = Session.from_dict(data)
                     self._sessions[session.id] = session
-                    if session.is_active:
+                    if session.is_active and auto_activate:
                         self._current = session
                 except (json.JSONDecodeError, KeyError):
                     pass

@@ -69,7 +69,24 @@ def _own_conversation(user_id: str, conversation_id: str) -> dict:
 
 @app.get("/ai/health")
 def health():
-    return {"status": "ok", "service": "ai-company"}
+    """Liveness + the model this service will actually call.
+
+    Exposing the resolved model/endpoint makes "did the deployment pick up my
+    DeepSeek config?" verifiable with one curl, instead of digging in logs.
+    """
+    from src.model_config import load_runtime_model, is_oneapi_endpoint, resolve_api_key
+    rm = load_runtime_model()
+    key = resolve_api_key(rm.base_url)
+    return {
+        "status": "ok",
+        "service": "ai-company",
+        "model": rm.model,
+        "provider": rm.provider,
+        "base_url": rm.base_url,
+        "endpoint_kind": "oneapi" if is_oneapi_endpoint(rm.base_url) else "external",
+        "api_key_set": bool(key),
+        "api_key_source": "AI_COMPANY_DEEPSEEK_API_KEY/DEEPSEEK_API_KEY",
+    }
 
 
 @app.post("/ai/chat")
@@ -90,10 +107,15 @@ async def chat(req: ChatRequest):
         conversation_id = created["conversation_id"]
         title = created["title"]
 
-    # 2. Run the CEO with this conversation's history injected
+    # 2. Run the CEO with this conversation's history injected.
+    #    The conversation scope is bound for the whole call so that every shared
+    #    store (workspace artifacts, engram memory) is namespaced to THIS chat —
+    #    without it, one user's content leaks into the next user's context.
     from src.ceo.dispatcher import run_ceo
+    from src.session.scope import scope
     try:
-        result = await run_ceo(req.message, session_id=conversation_id)
+        with scope(conversation_id):
+            result = await run_ceo(req.message, session_id=conversation_id)
     except Exception as e:
         logger.exception("run_ceo failed")
         raise HTTPException(status_code=500, detail=f"ai error: {type(e).__name__}: {e}")
@@ -159,11 +181,13 @@ def delete_conversation(conversation_id: str, user_id: str):
     """Delete a conversation (ownership checked)."""
     if not user_store.delete_conversation(user_id, conversation_id):
         raise HTTPException(status_code=404, detail="conversation not found or not owned")
-    # Also clear its file history
+    # Also clear its on-disk history + in-process cache (path honours service mode)
+    from src.session.memory import session_memory_path, forget_session_memory
     try:
-        os.remove(os.path.expanduser(f"~/.ai-company/sessions/{conversation_id}/memory.json"))
+        os.remove(session_memory_path(conversation_id))
     except OSError:
         pass
+    forget_session_memory(conversation_id)
     return {"deleted": conversation_id}
 
 
