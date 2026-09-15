@@ -10,7 +10,9 @@
     - 改 backend_django/templates/views/WorkplaceLayout/index.html (悬浮窗)
     - 增 backend_django/ai_company/                   (接入件包)
     - 增 backend_django/static/src/ai_company/        (悬浮窗前端的 js/css)
-  首次改动前会把原文件备份成 ``<name>.bak.ai-company``。
+  改动前**不生成 .bak** —— dev_admin 本身就是 git 仓库，回滚走
+  ``git checkout``，安装结束会打印对应命令。若目标文件不在仓库内或没被
+  跟踪，会显式告警（不制造「以为能回滚、其实不能」的假象）。
 
 用法（在 222.223.144.110 上以 my 用户执行）::
 
@@ -24,6 +26,7 @@ import argparse
 import hashlib
 import re
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -76,13 +79,30 @@ def log(msg: str) -> None:
     print(msg)
 
 
-def backup(path: Path) -> None:
-    if not path.exists():
+def git_root(path: Path) -> Path | None:
+    """向上找所属 git 仓库根（回滚要用）。"""
+    for d in (path, *path.parents):
+        if (d / ".git").exists():
+            return d
+    return None
+
+
+def note_rollback(path: Path) -> None:
+    """不写 .bak：dev_admin 是 git 仓库，回滚交给 git。
+
+    但「能被 git 回滚」这个前提得成立 —— 目标文件若不在仓库里、或没被
+    跟踪，就显式告警，别制造「以为能回滚」的假象。
+    """
+    repo = git_root(path)
+    if repo is None:
+        log(f"  [!] {path} 不在 git 仓库内 —— 本次改动无法回滚")
         return
-    bak = path.with_name(path.name + ".bak.ai-company")
-    if not bak.exists():
-        shutil.copy2(path, bak)
-        log(f"  备份 -> {bak.name}")
+    r = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "--error-unmatch", str(path.relative_to(repo))],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        log(f"  [!] {path} 未被 git 跟踪 —— 本次改动无法回滚")
 
 
 def patch_settings(path: Path) -> bool:
@@ -110,7 +130,7 @@ def patch_settings(path: Path) -> bool:
         log("  AI_COMPANY_* 配置块已存在（跳过）")
 
     if changed:
-        backup(path)
+        note_rollback(path)
         path.write_text(text, encoding="utf-8")
     return changed
 
@@ -124,7 +144,7 @@ def patch_urls(path: Path) -> bool:
         raise SystemExit(f"[x] 在 {path} 里找不到锚点 {ANCHOR_URL!r}")
     # 必须挂在 api/ 之前：否则 /api/ai/... 会先被 api.urls 抢走
     text = text.replace(ANCHOR_URL, URL_LINE + "\n" + ANCHOR_URL, 1)
-    backup(path)
+    note_rollback(path)
     path.write_text(text, encoding="utf-8")
     log("  urls.py 挂载 /api/ai/ -> ai_company.urls_host")
     return True
@@ -136,7 +156,7 @@ def patch_index_html(path: Path, version: str) -> bool:
         # 已引入过：把 ?v= 换成新版本（升级前端时很关键，否则浏览器吃旧 JS）
         new = stamp_version(text, version)
         if new != text:
-            backup(path)
+            note_rollback(path)
             path.write_text(new, encoding="utf-8")
             log(f"  index.html 版本号已标注 -> ?v={version}")
             return True
@@ -145,7 +165,7 @@ def patch_index_html(path: Path, version: str) -> bool:
     if "</body>" not in text:
         raise SystemExit(f"[x] 在 {path} 里找不到 </body>")
     text = text.replace("</body>", WIDGET_HTML.format(v=version) + "  </body>", 1)
-    backup(path)
+    note_rollback(path)
     path.write_text(text, encoding="utf-8")
     log(f"  index.html 引入悬浮窗 js/css（?v={version}）")
     return True
@@ -226,6 +246,15 @@ def main() -> int:
 
     log("[3/3] 完成")
     log(f"  时间戳: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    repo = git_root(dev_admin) or dev_admin
+    rels = " ".join(
+        str(p.relative_to(repo)) for p in (settings_py, urls_py, index_html)
+    )
+    log("")
+    log("回滚（dev_admin 是 git 仓库，无需 .bak）：")
+    log(f"  cd {dev_admin} && git checkout -- {rels}")
+    log(f"  rm -rf {bd / 'ai_company'} {bd / 'static' / 'src' / 'ai_company'}")
+    log("  然后重启： bash start.sh")
     return 0
 
 

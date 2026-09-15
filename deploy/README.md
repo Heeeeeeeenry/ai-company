@@ -146,7 +146,9 @@ python3 patch_dev_admin.py --stage /tmp/ai-company-stage
 # 然后重启：kill $(cat ~/dev_admin/.run/backend.pid); ~/dev_admin/start.sh
 ```
 
-安装器**幂等**，只碰这些地方（改动前自动备份成 `*.bak.ai-company`）：
+安装器**幂等**，只碰这些地方。**改动前不生成 `.bak`** —— `~/dev_admin` 本身就是
+git 仓库，回滚交给 git（安装器结束时会打印对应的 `git checkout` 命令；若目标文件
+没被 git 跟踪，会显式告警）。
 
 | 文件 | 改动 |
 |---|---|
@@ -199,18 +201,20 @@ curl -s -o /dev/null -w '%{http_code}\n' http://dev-admin.hsmyzg.com/src/ai_comp
 ## 6. 回滚
 
 ```bash
-# 6.1 撤接入件
-cd ~/dev_admin/backend_django
-for f in backend_django/settings.py backend_django/urls.py \
-         templates/views/WorkplaceLayout/index.html; do
-  [ -f "$f.bak.ai-company" ] && cp "$f.bak.ai-company" "$f"
-done
-rm -rf ai_company static/src/ai_company
+# 6.1 撤接入件（dev_admin 是 git 仓库，用 git 回滚，不用 .bak）
+cd ~/dev_admin
+git checkout -- backend_django/backend_django/settings.py \
+                backend_django/backend_django/urls.py \
+                backend_django/templates/views/WorkplaceLayout/index.html
+rm -rf backend_django/ai_company backend_django/static/src/ai_company
 kill "$(cat ~/dev_admin/.run/backend.pid)"; ~/dev_admin/start.sh
 
 # 6.2 停容器
 cd ~/ai-company && docker compose down
 ```
+
+> 部署前若想在 `~/dev_admin` 留个还原点，按仓库本身的规矩 commit 一下即可：
+> `cd ~/dev_admin && git add -A && git commit -m "before ai-company install"`。
 
 ## 7. 常见故障
 
