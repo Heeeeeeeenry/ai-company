@@ -532,6 +532,78 @@ TOOL_REGISTRY = {
 }
 
 
+# ─── 协议泄漏防护 ────────────────────────────────
+# 背景（2026-09-15，线上连续两次）：
+#   模型偶发不按约定吐 JSON，而是漂到 XML 形态的工具调用
+#   （如 <list_dir><path>/data/.ai-company/workspace</path></list_dir>），
+#   或把工具调用本身当成答案。这类文本一旦走到 "final output"，
+#   用户界面上看到的就是协议原文而不是答案（用户原话："又出现了这种情况"）。
+#   实测：_extract_maxiter_output('<list_dir>…</list_dir>') 会原样返回。
+#   这里集中识别 + 剔除，避免每个出口各写一套、各漏一处。
+_XML_TAG_TMPL = r"<\s*/?\s*(?:%s)\b[^>]*>"
+
+
+def _tool_name_alternation() -> str:
+    """工具名的正则候选（长的优先，避免 web_search / search 互相截断）。"""
+    import re as _re
+    names = sorted((str(n) for n in TOOL_REGISTRY if n), key=len, reverse=True)
+    return "|".join(_re.escape(n) for n in names)
+
+
+def looks_like_protocol_leak(text: str) -> bool:
+    """判断文本是"模型在说协议"而不是"给人看的答案"。"""
+    import re as _re
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.startswith("{") and _re.search(r'"action"\s*:\s*"(final|tool|unknown)"', t):
+        return True
+    alt = _tool_name_alternation()
+    if alt and _re.search(_XML_TAG_TMPL % alt, t, _re.IGNORECASE):
+        return True
+    return False
+
+
+def strip_protocol_leak(text: str) -> str:
+    """剥掉协议残留（JSON 信封 / XML 工具调用），只留给人看的文字。"""
+    import re as _re
+    t = (text or "").strip()
+    if not t:
+        return ""
+    # 1) 整块就是 JSON 信封 → 取 output
+    if t.startswith("{"):
+        try:
+            import json as _json
+            obj = _json.loads(t)
+            if isinstance(obj, dict) and obj.get("action") == "final":
+                return str(obj.get("output") or "").strip()
+        except Exception:  # noqa: BLE001 - 剥不干净也必须继续往下走
+            pass
+    # 2) 成对的 <tool …>…</tool> 工具调用块
+    alt = _tool_name_alternation()
+    if alt:
+        t = _re.sub(
+            r"<\s*(%s)\b[^>]*>.*?<\s*/\s*\1\s*>" % alt,
+            " ", t, flags=_re.IGNORECASE | _re.DOTALL,
+        )
+        # 3) 落单的开/自闭标签（模型经常只吐一半）
+        t = _re.sub(_XML_TAG_TMPL % alt, " ", t, flags=_re.IGNORECASE)
+    # 4) 内嵌的 JSON 工具调用片段
+    t = _re.sub(r'\{\s*"action"\s*:\s*"tool"[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', " ", t)
+    t = _re.sub(r'\{\s*"action"\s*:\s*"unknown".*$', " ", t, flags=_re.DOTALL)
+    return _re.sub(r"[ \t]{2,}", " ", _re.sub(r"\n{3,}", "\n\n", t)).strip()
+
+
+def sanitize_for_user(text: str) -> str:
+    """任何面向用户的出口都过这里：宁可回一句可操作的话，也不吐协议原文。"""
+    if not looks_like_protocol_leak(text):
+        return text
+    cleaned = strip_protocol_leak(text)
+    if cleaned:
+        return cleaned
+    return "（模型返回了内部协议内容，已拦截，没有可用的答案。请重试或换个说法。）"
+
+
 def _extract_maxiter_output(raw: str, tool_calls: list) -> str:
     """Extract meaningful content from a max-iterations LLM response."""
     import json as _json, re as _re
@@ -552,12 +624,12 @@ def _extract_maxiter_output(raw: str, tool_calls: list) -> str:
                 )
     except (_json.JSONDecodeError, Exception):
         pass
-    # Try to extract text before any tool call JSON
-    text_parts = _re.split(r'\{\s*"action"\s*:\s*"tool"', raw)
-    text = text_parts[0].strip()
-    if len(text) > 20:
-        return text[:2000]
-    # Nothing useful extracted — don't leak raw JSON to user
+    # 非 JSON：可能是 XML 形态的工具调用，或"散文 + 协议"混排。
+    # 先剥协议再判断，否则模型吐一句 <list_dir>…</list_dir> 就会被当成答案。
+    cleaned = strip_protocol_leak(raw)
+    if len(cleaned) > 20:
+        return cleaned[:2000]
+    # 剥完什么都不剩 = 整条都是协议。宁可回一句可操作的话，也不把协议吐给用户
     tools_list = ', '.join(dict.fromkeys(tc.get('tool','?') for tc in tool_calls)) if tool_calls else '?'
     return f"任务执行超时（{len(tool_calls)} 轮）。使用工具: {tools_list}。请重试或简化查询。"
 
@@ -1033,6 +1105,10 @@ Keep responses concise."""
         # On first two passes, a non-JSON answer means the LLM skipped tools —
         # push back so it gets another chance to use the correct format.
         if iteration >= 3 and len(raw) > 20:
+            # 协议泄漏防护：XML 形态工具调用 / JSON 壳残留，绝不能当答案展示。
+            # 返回 unknown → 循环再纠偏一轮；真撑到 max-iter 也有兜底文案。
+            if looks_like_protocol_leak(raw):
+                return {"action": "unknown", "raw": raw[:500]}
             # ── Compliance boilerplate detection ──
             # deepseek-v4-pro sometimes responds to format correction with
             # compliance ack ("收到，我会严格遵守...") instead of the actual answer.

@@ -143,6 +143,11 @@ async def chat(req: ChatRequest):
         logger.exception("chat failed")
         raise HTTPException(status_code=500, detail=f"ai error: {type(e).__name__}: {e}")
 
+    # 2.5 对外总闸：协议原文（JSON 信封 / XML 工具调用）绝不能进用户界面。
+    #     上游各条链都各自清洗过，这里是最后一道，防止将来新加的路径再漏。
+    from src.execution.executor import sanitize_for_user
+    reply = sanitize_for_user(reply)
+
     # 3. Record the turn in persistent history
     _history(conversation_id).record_conversation(req.message, reply)
 
@@ -287,8 +292,11 @@ async def chat_stream(req: ChatRequest):
                 else:
                     # 普通对话（或取数不可用）：走完整 CEO 流程，再逐字呈现。
                     from src.ceo.dispatcher import run_ceo
+                    from src.execution.executor import sanitize_for_user
                     result = await run_ceo(req.message, session_id=conversation_id)
-                    final_text = str(result.get("final_output") or result.get("output") or "")
+                    final_text = sanitize_for_user(
+                        str(result.get("final_output") or result.get("output") or "")
+                    )
                     async for piece in _typing_chunks(final_text):
                         yield _sse({"type": "delta", "text": piece})
 
