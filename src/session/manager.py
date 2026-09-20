@@ -50,10 +50,18 @@ class SessionManager:
         self._load_all()
         # Auto-resume last active session, or create default
         if not self._current:
-            # Try to find last active
-            active = [s for s in self._sessions.values() if s.is_active]
+            # Enforce single-active invariant: if multiple sessions are marked
+            # active on disk (stale state from a crashed/parallel process), keep
+            # only the most recently active one and deactivate the rest.
+            active = sorted(
+                [s for s in self._sessions.values() if s.is_active],
+                key=lambda s: s.last_active, reverse=True,
+            )
             if active:
                 self._current = active[0]
+                for stale in active[1:]:
+                    stale.is_active = False
+                    self._save_metadata(stale)
             else:
                 # Create default session
                 self._current = self.create("default")
@@ -79,8 +87,6 @@ class SessionManager:
         """
         if not os.path.exists(SESSION_DIR):
             return
-        from src.session.memory import service_mode
-        auto_activate = not service_mode()
         for sid in os.listdir(SESSION_DIR):
             path = self._metadata_path(sid)
             if os.path.exists(path):
@@ -89,10 +95,12 @@ class SessionManager:
                         data = json.load(f)
                     session = Session.from_dict(data)
                     self._sessions[session.id] = session
-                    if session.is_active and auto_activate:
-                        self._current = session
                 except (json.JSONDecodeError, KeyError):
                     pass
+        # Don't pick `_current` inside the loop: os.listdir order is arbitrary,
+        # so with multiple active sessions on disk it would pick whichever
+        # directory happens to be visited last. Resolve after loading, keeping
+        # only the most recently active session (see __init__).
     
     def create(self, name: str) -> Session:
         """Create a new session."""
@@ -129,10 +137,13 @@ class SessionManager:
                 target = matches[0]
         if target is None:
             return None
-        # Deactivate current, activate target
-        if self._current:
-            self._current.is_active = False
-            self._save_metadata(self._current)
+        # Enforce single-active invariant: deactivate every session first, then
+        # activate only the target. This self-heals any stale duplicate `active`
+        # flags that may have appeared on disk since startup.
+        for s in self._sessions.values():
+            if s.is_active:
+                s.is_active = False
+                self._save_metadata(s)
         target.is_active = True
         target.last_active = datetime.now().isoformat()
         self._current = target
