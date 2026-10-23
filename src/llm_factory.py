@@ -87,16 +87,19 @@ def get_llm(role: str = "ceo", model_tier: str = "") -> BaseChatModel:
                 model_name = tier_model
 
         # OneAPI is the configured internal OpenAI-compatible proxy. Older
-        # env files may still say deepseek-chat/deepseek-v4-pro; map only
-        # those stale model names to the current runtime model. Log at DEBUG
-        # to avoid noisy warnings during normal execution.
+        # env files may still say deepseek-chat, which DeepSeek has deprecated
+        # (the live model list is deepseek-flash + deepseek-v4-pro; the API
+        # silently serves deepseek-chat as deepseek-flash). Map those stale
+        # names to the current runtime model, and log at WARNING so the
+        # substitution is never invisible.
         if model_name.strip().lower() in STALE_DEEPSEEK_MODELS:
             old_model = model_name
             model_name = runtime_model.model
             if old_model != model_name:
-                logger.debug(
-                    "Model redirect: %s → %s (stale model replaced with runtime config)",
-                    old_model, model_name,
+                logger.warning(
+                    "Model redirect: %s → %s — '%s' is a DEPRECATED DeepSeek name "
+                    "(API now serves it as deepseek-flash); using runtime config instead.",
+                    old_model, model_name, old_model,
                 )
         is_reasoner = "reasoner" in model_name.lower()
         _max_tokens_map = {

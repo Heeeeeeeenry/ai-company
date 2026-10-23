@@ -34,7 +34,7 @@ VISION_MODELS = {
     },
     "deepseek": {
         "provider": "deepseek",
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "max_tokens": 300,
         "description": "DeepSeek (vision NOT yet supported — placeholder)",
         "vision_supported": False,

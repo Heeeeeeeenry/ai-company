@@ -70,7 +70,7 @@ def is_capturable(task: str, score: int, tool_calls: list[dict], department: str
 def extract_pattern(task: str, tool_calls: list[dict], department: str) -> Optional[dict]:
     """Extract a reusable skill pattern from a successful task.
 
-    Uses LLM (deepseek-chat) to analyze the tool call sequence and generate:
+    Uses LLM (deepseek-flash) to analyze the tool call sequence and generate:
     - name: short descriptive name
     - description: what this skill does
     - triggers: keyword patterns that should activate this skill
@@ -121,7 +121,7 @@ Rules:
 
         client = openai.OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model="deepseek-flash",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=500,

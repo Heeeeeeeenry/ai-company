@@ -63,7 +63,7 @@ class TokenBudget:
         """Initialize budget.
 
         Args:
-            max_total: Total token budget (deepseek-chat default 16K).
+            max_total: Total token budget (deepseek-flash default 16K).
             max_prompt: Maximum tokens allowed for prompt/system context.
         """
         self.max_total = max_total

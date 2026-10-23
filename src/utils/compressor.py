@@ -28,7 +28,7 @@ async def _llm_summarize(conversation_text: str) -> str:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         llm = ChatOpenAI(
-            model="deepseek-chat",
+            model="deepseek-flash",
             api_key=config.deepseek_api_key,
             base_url="https://api.deepseek.com/v1",
             timeout=15,

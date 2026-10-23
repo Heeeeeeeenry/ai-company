@@ -110,7 +110,7 @@ class EngramBackend:
             ("禁止主动删数据。需删除时中文二次确认。DROP/DELETE/TRUNCATE/git push -f 等破坏性操作先询问。", "safety"),
             ("修改代码后必须端到端测试验证才能说'完成'。禁止未测试就声称完成。", "quality"),
             ("3+轮未解→激活stubborn-problem-workflow；不要保守不等提示。", "process"),
-            ("ai-company Python 3.12 (conda)，通过 goudan 启动。DeepSeek API (deepseek-chat)，LangGraph 工作流。", "environment"),
+            ("ai-company Python 3.12 (conda)，通过 goudan 启动。DeepSeek API (deepseek-flash)，LangGraph 工作流。", "environment"),
             ("wechat paste: pbcopy+Cmd/V 发中文; 文件传输助手 sidebar。Kimi vision moonshot-v1-8k-vision-preview。", "tool"),
             ("WeChat发送是canary功能——如果坏了用户立刻发现并愤怒。任何代码改动后必须验证WeChat发送仍可用才声称完成。", "critical"),
             ("偏好快速响应：综合查询时并行发起操作，不串行等待。偏好自主决策：'自行决断'=直接执行不逐项确认。", "preference"),

@@ -2,7 +2,7 @@
 
 Two-layer classification:
   Layer 1: Keyword fast-path (0 LLM cost, >90% coverage)
-  Layer 2: LLM classification via deepseek-chat (ambiguous fallback)
+  Layer 2: LLM classification via deepseek-flash (ambiguous fallback)
 
 Supports 13 intent types:
   COMMAND, SEARCH, RESEARCH, VISION, SOCIAL,
@@ -194,7 +194,7 @@ class IntentRouter:
     """Two-layer intent classifier.
 
     Layer 1: regex keyword fast-path, 0 LLM cost.
-    Layer 2: LLM classification via deepseek-chat for ambiguous inputs.
+    Layer 2: LLM classification via deepseek-flash for ambiguous inputs.
 
     Model tier assignment:
       Each intent is mapped to a model tier (tiny/standard/premium)
@@ -206,12 +206,12 @@ class IntentRouter:
         """Look up the recommended model tier for an intent."""
         return INTENT_TO_TIER.get(intent, "standard")
 
-    def __init__(self, llm_model: str = "deepseek-chat"):
+    def __init__(self, llm_model: str = "deepseek-flash"):
         """Initialize the router.
 
         Args:
             llm_model: Model name for LLM classification (Layer 2).
-                       Default: deepseek-chat.
+                       Default: deepseek-flash.
         """
         self._llm_model = llm_model
         # Compile regex patterns once for performance
@@ -280,7 +280,7 @@ class IntentRouter:
     def _classify_llm(self, text: str) -> IntentResult:
         """LLM-based classification for inputs that don't match keywords.
 
-        Uses deepseek-chat via OpenAI-compatible API.
+        Uses deepseek-flash via OpenAI-compatible API.
         """
         try:
             client = _get_llm_client()

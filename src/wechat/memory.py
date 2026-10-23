@@ -82,7 +82,7 @@ class MemoryAgent:
         try:
             client = self._get_llm()
             resp = client.chat.completions.create(
-                model="deepseek-chat",
+                model="deepseek-flash",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=300,
                 temperature=0.3,

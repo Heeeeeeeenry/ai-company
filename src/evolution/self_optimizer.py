@@ -411,7 +411,7 @@ Output your analysis and any changes you recommend."""
             )
             
             resp = client.chat.completions.create(
-                model="deepseek-chat",
+                model="deepseek-flash",
                 messages=[{"role": "user", "content": analysis_prompt}],
                 max_tokens=500,
                 temperature=0.5,

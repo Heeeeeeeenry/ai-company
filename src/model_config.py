@@ -17,12 +17,15 @@ CONFIG_PATH = Path(os.getenv("AI_COMPANY_MODEL_CONFIG", "~/.ai-company/model_con
 DEFAULT_BASE_URL = "https://oneapi-comate.baidu-int.com/v1"
 DEFAULT_MODEL = "DeepSeek-V4-Flash"
 DEFAULT_PROVIDER = "oneapi"
+# DeepSeek 已废弃的旧模型名。官方 API 现在的模型列表只有
+# deepseek-flash + deepseek-v4-pro；deepseek-chat 仍被接受但会被静默当成
+# deepseek-flash 服务，所以任何还在用旧名的配置都应重定向到当前模型。
 STALE_DEEPSEEK_MODELS = {"deepseek-chat"}
 
 # ─── 端点识别 ──────────────────────────────────────────────────────────
 # ai-company 可以走两条完全不同的 DeepSeek 线路：
 #   1. oneapi  — 公司内网 OneAPI 代理，模型名形如 DeepSeek-V4-Flash
-#   2. deepseek— DeepSeek 官方 API，模型名形如 deepseek-chat / deepseek-reasoner
+#   2. deepseek— DeepSeek 官方 API，模型名形如 deepseek-flash / deepseek-v4-pro
 # 两者的凭证与模型名不通用，因此必须按端点选择 key，不能拿一把 key 通吃。
 ONEAPI_HOST_MARKERS = ("oneapi-comate.baidu-int.com",)
 OFFICIAL_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
@@ -92,7 +95,7 @@ def load_runtime_model(path: Path = CONFIG_PATH) -> RuntimeModelConfig:
     if not base_url:
         base_url = OFFICIAL_DEEPSEEK_BASE_URL if provider == "deepseek" else DEFAULT_BASE_URL
 
-    # deepseek-chat 只是内网 OneAPI 上的遗留名（官方侧它是合法模型名）。
+    # deepseek-chat 已在官方侧废弃（现为 deepseek-flash 的别名）。
     # 因此仅在 OneAPI 端点上做重定向，走官方 API 时原样保留。
     if model.strip().lower() in STALE_DEEPSEEK_MODELS and is_oneapi_endpoint(base_url):
         model = DEFAULT_MODEL

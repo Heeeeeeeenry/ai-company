@@ -2,7 +2,7 @@
 
 Two-layer intent classification:
   Layer 1: Keyword fast-path (0 LLM cost)
-  Layer 2: LLM classification via deepseek-chat
+  Layer 2: LLM classification via deepseek-flash
 
 Supports 13 intent types:
   COMMAND, SEARCH, RESEARCH, VISION, SOCIAL,

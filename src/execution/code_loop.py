@@ -42,7 +42,7 @@ class CodeLoop:
         - 非 Python 代码 → 跳过整个闭环
     """
 
-    def __init__(self, max_iterations: int = 3, llm_model: str = "deepseek-chat"):
+    def __init__(self, max_iterations: int = 3, llm_model: str = "deepseek-flash"):
         self.max_iterations = max_iterations
         self.llm_model = llm_model
         self._project_root = os.path.abspath(
@@ -359,7 +359,7 @@ class CodeLoop:
                     pass
 
     async def _llm_fix(self, code: str, error: str, attempt: int) -> str:
-        """调用 LLM (deepseek-chat) 根据错误修复代码。
+        """调用 LLM (deepseek-flash) 根据错误修复代码。
 
         Args:
             code: 当前有错误的代码
